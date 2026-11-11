@@ -1,0 +1,5 @@
+# 서버(리눅스)와 윈도우 PC에서 모두 문제없도록 줄바꿈을 맞춰요
+* text=auto eol=lf
+*.bat text eol=crlf
+*.png binary
+*.pdf binary
