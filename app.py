@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-연지의 영어 다이어리 — 서버 (Python 표준 라이브러리만 사용, 추가 설치 없음)
+연지쌤 영어 다이어리 — 서버 (Python 표준 라이브러리만 사용, 추가 설치 없음)
 
 - PythonAnywhere 같은 WSGI 호스팅: 이 파일의 `application` 을 연결하면 돼요.
 - 내 PC에서 실행: `python app.py`  →  http://localhost:3000
 데이터: DATA_DIR/db.json, 업로드 파일: DATA_DIR/uploads/
 """
+import base64
 import hashlib
 import hmac
 import json
@@ -34,6 +35,13 @@ ALLOWED_EXT = ['pdf', 'hwp', 'hwpx', 'doc', 'docx', 'ppt', 'pptx', 'xls', 'xlsx'
 CATEGORIES = ['단어', '본문', '문법', '기타']
 ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,40}$')
 SCRYPT = {'n': 16384, 'r': 8, 'p': 1, 'dklen': 32}
+# 과제 사진: 화면에서 줄여서 보내지만, 서버에서도 한 장 크기와 장수를 확인해요.
+MAX_PHOTOS = 4
+MAX_PHOTO_BYTES = 3 * 1024 * 1024
+STORAGE_QUOTA = int(os.environ.get('STORAGE_QUOTA_MB') or 512) * 1024 * 1024  # PythonAnywhere 무료 계정 512MB
+GRADES = {'excellent': '아주 잘했어요', 'good': '잘했어요', 'retry': '다시 해 봐요'}
+OLD_WELCOME = '연지의 영어 다이어리에 오신 것을 환영해요!'
+NEW_WELCOME = '연지쌤 영어 다이어리에 오신 것을 환영해요!'
 
 
 # ---------- 유틸 ----------
@@ -137,11 +145,14 @@ def load_db():
         settings['secret'] = secrets.token_hex(32)
     if not settings.get('classCode'):
         settings['classCode'] = 'JOJONG'
-    for key in ('units', 'worksheets', 'questions', 'notices', 'students'):
+    for key in ('units', 'worksheets', 'questions', 'notices', 'students', 'assignments', 'submissions'):
         if not isinstance(db.get(key), list):
             db[key] = []
     if not isinstance(db.get('sessions'), dict):
         db['sessions'] = {}
+    for n in db['notices']:  # 앱 이름이 바뀌어서 처음 환영 공지 제목도 바꿔요
+        if n.get('title') == OLD_WELCOME:
+            n['title'] = NEW_WELCOME
     # 선생님 비밀번호: 환경 변수 TEACHER_PASSWORD 가 있으면 처음에 그 값을 쓰고,
     # 없으면 처음 접속한 선생님이 화면에서 직접 만들어요.
     # 비밀번호를 잊었을 때: RESET_TEACHER_PASSWORD=1 과 새 TEACHER_PASSWORD 를 넣고 다시 시작하면 초기화돼요.
@@ -213,8 +224,8 @@ def read_body(req, limit):
     return b''.join(chunks)
 
 
-def read_json(req):
-    buf = read_body(req, 2 * 1024 * 1024)
+def read_json(req, limit=2 * 1024 * 1024):
+    buf = read_body(req, limit)
     if not buf:
         return {}
     try:
@@ -706,6 +717,7 @@ def admin_overview(req):
         'currentUnitId': db['settings'].get('currentUnitId'),
         'defaultPassword': False,
         'studentCount': len(db['students']),
+        'hwWaiting': sum(1 for s in db['submissions'] if s['status'] == 'submitted'),
         'recentSheets': [sheet_out(w) for w in recent],
     })
 
@@ -745,7 +757,7 @@ def admin_delete_unit(req):
             remove_stored(w['stored'])
     db['worksheets'] = [w for w in db['worksheets'] if w['unitId'] != unit_id]
     db['questions'] = [q for q in db['questions'] if q['unitId'] != unit_id]
-    for n in db['notices']:
+    for n in db['notices'] + db['assignments']:
         if n.get('unitId') == unit_id:
             n['unitId'] = None
     if db['settings'].get('currentUnitId') == unit_id:
@@ -937,6 +949,8 @@ def admin_delete_student(req):
     sid = req.params['id']
     db['students'] = [s for s in db['students'] if s['id'] != sid]
     db['questions'] = [q for q in db['questions'] if q['studentId'] != sid]
+    for sub in [s for s in db['submissions'] if s['studentId'] == sid]:
+        remove_submission(sub)
     for k, v in list(db['sessions'].items()):
         if v.get('studentId') == sid:
             del db['sessions'][k]
@@ -979,8 +993,331 @@ def admin_password(req):
     return ok({'ok': True})
 
 
+# ---------- 과제 (사진 제출 · 선생님 피드백) ----------
+def find_assignment(assignment_id, auth):
+    a = find_by_id(db['assignments'], assignment_id)
+    if not a or (auth['role'] != 'teacher' and a['status'] != 'published'):
+        raise HttpError(404, '과제를 찾을 수 없어요.')
+    return a
+
+
+def my_submission(assignment_id, student_id):
+    return next((s for s in db['submissions'] if s['assignmentId'] == assignment_id and s['studentId'] == student_id), None)
+
+
+def student_label(st):
+    return f"{st['grade']}학년 {st['klass']}반 {st['number']}번 {st['name']}" if st else '(삭제된 학생)'
+
+
+def media_sig(sub_id, idx, exp):
+    return sign(f'm.{sub_id}.{idx}.{exp}')
+
+
+def media_url(sub, idx):
+    exp = now_ms() + 6 * 3600 * 1000
+    return f"/media/{sub['id']}/{idx}?exp={exp}&sig={media_sig(sub['id'], idx, exp)}"
+
+
+def assignment_out(a):
+    unit = find_by_id(db['units'], a['unitId']) if a.get('unitId') else None
+    return {
+        'id': a['id'], 'title': a['title'], 'description': a.get('description', ''), 'unitId': a.get('unitId'),
+        'unitTitle': unit['title'] if unit else '', 'dueDate': a.get('dueDate', ''), 'status': a['status'],
+        'createdAt': a['createdAt'], 'updatedAt': a.get('updatedAt'),
+    }
+
+
+def submission_out(s, for_teacher):
+    out = {
+        'id': s['id'], 'assignmentId': s['assignmentId'], 'text': s.get('text', ''), 'status': s['status'],
+        'grade': s.get('grade', ''), 'gradeLabel': GRADES.get(s.get('grade', ''), ''), 'feedback': s.get('feedback', ''),
+        'reviewedAt': s.get('reviewedAt'), 'createdAt': s['createdAt'], 'updatedAt': s.get('updatedAt'),
+        'resubmitted': bool(s.get('resubmitted')),
+        'photos': [{'url': media_url(s, i)} for i in range(len(s.get('photos', [])))],
+    }
+    if for_teacher:
+        st = find_by_id(db['students'], s['studentId'])
+        out['student'] = student_label(st)
+    return out
+
+
+def remove_submission(sub):
+    for p in sub.get('photos', []):
+        remove_stored(p.get('stored'))
+    if sub in db['submissions']:
+        db['submissions'].remove(sub)
+
+
+def storage_used():
+    total = 0
+    try:
+        with os.scandir(UPLOAD_DIR) as entries:
+            for e in entries:
+                if e.is_file():
+                    total += e.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
+def decode_photo(value):
+    """화면에서 줄여 보낸 사진(data URL)을 확인해요. JPG·PNG·WEBP만 받아요."""
+    if not isinstance(value, str):
+        raise HttpError(400, '사진을 읽을 수 없어요.')
+    m = re.match(r'^data:image/[a-z0-9.+-]+;base64,', value)
+    b64 = value[m.end():] if m else value
+    try:
+        raw = base64.b64decode(b64, validate=True)
+    except ValueError:
+        raise HttpError(400, '사진을 읽을 수 없어요.')
+    if len(raw) > MAX_PHOTO_BYTES:
+        raise HttpError(413, '사진 한 장이 너무 커요. 다시 골라 주세요.')
+    if raw[:3] == b'\xff\xd8\xff':
+        return raw, 'jpg'
+    if raw[:8] == b'\x89PNG\r\n\x1a\n':
+        return raw, 'png'
+    if raw[:4] == b'RIFF' and raw[8:12] == b'WEBP':
+        return raw, 'webp'
+    raise HttpError(400, '사진 파일(JPG·PNG)만 올릴 수 있어요.')
+
+
+def confirm_pin(st, pin):
+    """과제를 낼 때 개인 비밀번호(PIN)를 한 번 더 확인해요. 틀리면 로그인과 같은 규칙으로 잠겨요."""
+    if st.get('lockUntil', 0) > now_ms():
+        minutes = -(-(st['lockUntil'] - now_ms()) // 60000)
+        raise HttpError(429, f'PIN을 여러 번 틀려서 잠겼어요. {minutes}분 뒤에 다시 해 주세요.')
+    if not re.fullmatch(r'\d{4}', pin or '') or not st.get('pinHash') or not verify_secret(pin, st['pinHash']):
+        st['fails'] = st.get('fails', 0) + 1
+        if st['fails'] >= 5:
+            st['fails'] = 0
+            st['lockUntil'] = now_ms() + 10 * 60 * 1000
+        save()
+        raise HttpError(403, '개인 비밀번호(PIN)가 맞지 않아요. 로그인할 때 쓰는 숫자 4자리예요.')
+    st['fails'] = 0
+
+
+@route('GET', '/api/assignments')
+def list_assignments(req):
+    auth = require_user(req)
+    items = [a for a in db['assignments'] if auth['role'] == 'teacher' or a['status'] == 'published']
+    items.sort(key=lambda a: a['createdAt'], reverse=True)
+    out = []
+    for a in items:
+        item = assignment_out(a)
+        if auth['role'] == 'student':
+            s = my_submission(a['id'], auth['student']['id'])
+            item['mine'] = {'id': s['id'], 'status': s['status'], 'grade': s.get('grade', ''), 'reviewedAt': s.get('reviewedAt')} if s else None
+        out.append(item)
+    return ok({'assignments': out})
+
+
+@route('GET', '/api/assignments/:id')
+def get_assignment(req):
+    auth = require_user(req)
+    a = find_assignment(req.params['id'], auth)
+    sub = None
+    if auth['role'] == 'student':
+        s = my_submission(a['id'], auth['student']['id'])
+        sub = submission_out(s, False) if s else None
+    return ok({'assignment': assignment_out(a), 'submission': sub})
+
+
+@route('POST', '/api/assignments/:id/submission')
+def submit_assignment(req):
+    auth = require_user(req)
+    if auth['role'] != 'student':
+        raise HttpError(403, '과제는 학생 계정으로 낼 수 있어요.')
+    st = auth['student']
+    a = find_assignment(req.params['id'], auth)
+    b = read_json(req, 16 * 1024 * 1024)
+    confirm_pin(st, str(get(b, 'pin') or ''))
+    existing = my_submission(a['id'], st['id'])
+    if existing and existing['status'] == 'reviewed' and existing.get('grade') != 'retry':
+        raise HttpError(400, '선생님이 이미 평가한 과제예요. 다시 내야 하면 선생님께 말씀드리세요.')
+    photos = as_list(get(b, 'photos'), MAX_PHOTOS + 1)
+    if len(photos) > MAX_PHOTOS:
+        raise HttpError(400, f'사진은 {MAX_PHOTOS}장까지 올릴 수 있어요.')
+    text = clean(get(b, 'text'), 1000, True)
+    if not photos and not text:
+        raise HttpError(400, '사진을 올리거나 내용을 적어 주세요.')
+    recent = [s for s in db['submissions'] if s['studentId'] == st['id'] and now_ms() - (s.get('updatedAt') or 0) < 3600 * 1000]
+    if len(recent) >= 30:
+        raise HttpError(429, '잠시 뒤에 다시 올려 주세요.')
+    decoded = [decode_photo(p) for p in photos]
+    incoming = sum(len(raw) for raw, _ in decoded)
+    if storage_used() + incoming > STORAGE_QUOTA * 0.97:
+        raise HttpError(400, '서버 저장 공간이 거의 찼어요. 선생님께 알려 주세요.')
+    stored = [{'stored': store_file(raw, ext), 'ext': ext, 'size': len(raw)} for raw, ext in decoded]
+    if existing:
+        for p in existing.get('photos', []):
+            remove_stored(p.get('stored'))
+        existing.update({'text': text, 'photos': stored, 'status': 'submitted', 'updatedAt': now_ms(), 'resubmitted': True})
+        sub = existing
+    else:
+        sub = {
+            'id': new_id('sb'), 'assignmentId': a['id'], 'studentId': st['id'], 'text': text, 'photos': stored,
+            'status': 'submitted', 'grade': '', 'feedback': '', 'reviewedAt': None,
+            'createdAt': now_ms(), 'updatedAt': now_ms(), 'resubmitted': False,
+        }
+        db['submissions'].append(sub)
+    save()
+    return ok({'submission': submission_out(sub, False)})
+
+
+@route('DELETE', '/api/assignments/:id/submission')
+def delete_my_submission(req):
+    auth = require_user(req)
+    if auth['role'] != 'student':
+        raise HttpError(403, '학생 계정에서만 지울 수 있어요.')
+    a = find_assignment(req.params['id'], auth)
+    s = my_submission(a['id'], auth['student']['id'])
+    if not s:
+        raise HttpError(404, '낸 과제가 없어요.')
+    if s['status'] == 'reviewed' and s.get('grade') != 'retry':
+        raise HttpError(400, '선생님이 평가한 과제는 지울 수 없어요.')
+    remove_submission(s)
+    save()
+    return ok({'ok': True})
+
+
+# 과제 사진 보기 (서명된 임시 주소: 그 학생과 선생님 화면에만 주소가 전달돼요)
+@route('GET', '/media/:sid/:idx')
+def media(req):
+    s = find_by_id(db['submissions'], req.params['sid'])
+    idx = int_in(req.params['idx'], 0, MAX_PHOTOS - 1)
+    try:
+        exp = int(req.q('exp'))
+    except ValueError:
+        exp = 0
+    sig = req.q('sig')
+    valid = (bool(s) and idx is not None and idx < len(s.get('photos', [])) and exp >= now_ms()
+             and hmac.compare_digest(sig.encode(), media_sig(s['id'], idx, exp).encode()))
+    if not valid:
+        return 403, [('Content-Type', 'text/plain; charset=utf-8')], ['사진 주소가 만료되었어요. 화면을 새로고침해 주세요.'.encode('utf-8')]
+    photo = s['photos'][idx]
+    path = os.path.join(UPLOAD_DIR, photo['stored'])
+    if not os.path.isfile(path):
+        raise HttpError(404, '사진을 찾을 수 없어요.')
+    headers = [
+        ('Content-Type', MIME.get(photo['ext'], 'application/octet-stream')),
+        ('Content-Length', str(os.path.getsize(path))),
+        ('Cache-Control', 'private, max-age=21600'),
+        ('Content-Disposition', 'inline'),
+    ]
+    return 200, headers, file_iter(path)
+
+
+def assignment_fields(b, a):
+    a['title'] = clean(get(b, 'title'), 150)
+    a['description'] = clean(get(b, 'description'), 3000, True)
+    unit_id = get(b, 'unitId')
+    a['unitId'] = unit_id if unit_id and find_by_id(db['units'], unit_id) else None
+    due = clean(get(b, 'dueDate'), 10)
+    a['dueDate'] = due if re.fullmatch(r'\d{4}-\d{2}-\d{2}', due) else ''
+    a['status'] = 'published' if get(b, 'status') == 'published' else 'draft'
+    if not a['title']:
+        raise HttpError(400, '과제 제목을 적어 주세요.')
+    a['updatedAt'] = now_ms()
+    return a
+
+
+@route('GET', '/api/admin/assignments')
+def admin_assignments(req):
+    require_teacher(req)
+    items = sorted(db['assignments'], key=lambda a: a['createdAt'], reverse=True)
+    out = []
+    for a in items:
+        subs = [s for s in db['submissions'] if s['assignmentId'] == a['id']]
+        item = assignment_out(a)
+        item['counts'] = {'submitted': len(subs), 'waiting': sum(1 for s in subs if s['status'] == 'submitted')}
+        out.append(item)
+    return ok({
+        'assignments': out, 'units': [unit_summary(u) for u in sorted_units()], 'studentCount': len(db['students']),
+        'storage': {'usedBytes': storage_used(), 'quotaBytes': STORAGE_QUOTA},
+    })
+
+
+@route('POST', '/api/admin/assignments')
+def admin_create_assignment(req):
+    require_teacher(req)
+    a = assignment_fields(read_json(req), {'id': new_id('as'), 'createdAt': now_ms()})
+    db['assignments'].append(a)
+    save()
+    return ok({'assignment': assignment_out(a)})
+
+
+@route('PUT', '/api/admin/assignments/:id')
+def admin_update_assignment(req):
+    require_teacher(req)
+    a = find_by_id(db['assignments'], req.params['id'])
+    if not a:
+        raise HttpError(404, '과제를 찾을 수 없어요.')
+    assignment_fields(read_json(req), a)
+    save()
+    return ok({'assignment': assignment_out(a)})
+
+
+@route('DELETE', '/api/admin/assignments/:id')
+def admin_delete_assignment(req):
+    require_teacher(req)
+    a = find_by_id(db['assignments'], req.params['id'])
+    if not a:
+        raise HttpError(404, '과제를 찾을 수 없어요.')
+    for s in [s for s in db['submissions'] if s['assignmentId'] == a['id']]:
+        remove_submission(s)
+    db['assignments'].remove(a)
+    save()
+    return ok({'ok': True})
+
+
+@route('GET', '/api/admin/assignments/:id/submissions')
+def admin_submissions(req):
+    require_teacher(req)
+    a = find_by_id(db['assignments'], req.params['id'])
+    if not a:
+        raise HttpError(404, '과제를 찾을 수 없어요.')
+    subs = [s for s in db['submissions'] if s['assignmentId'] == a['id']]
+    subs.sort(key=lambda s: (0 if s['status'] == 'submitted' else 1, -(s.get('updatedAt') or 0)))
+    done = {s['studentId'] for s in subs}
+    missing = sorted([st for st in db['students'] if st['id'] not in done], key=lambda st: (st['grade'], st['klass'], st['number']))
+    return ok({
+        'assignment': assignment_out(a), 'submissions': [submission_out(s, True) for s in subs],
+        'notSubmitted': [student_label(st) for st in missing],
+    })
+
+
+@route('POST', '/api/admin/submissions/:id/review')
+def admin_review_submission(req):
+    require_teacher(req)
+    s = find_by_id(db['submissions'], req.params['id'])
+    if not s:
+        raise HttpError(404, '제출한 과제를 찾을 수 없어요.')
+    b = read_json(req)
+    grade = get(b, 'grade')
+    if grade not in GRADES:
+        raise HttpError(400, '평가(아주 잘했어요·잘했어요·다시 해 봐요)를 골라 주세요.')
+    s['grade'] = grade
+    s['feedback'] = clean(get(b, 'feedback'), 3000, True)
+    s['status'] = 'reviewed'
+    s['reviewedAt'] = now_ms()
+    save()
+    return ok({'submission': submission_out(s, True)})
+
+
+@route('DELETE', '/api/admin/submissions/:id')
+def admin_delete_submission(req):
+    require_teacher(req)
+    s = find_by_id(db['submissions'], req.params['id'])
+    if not s:
+        raise HttpError(404, '제출한 과제를 찾을 수 없어요.')
+    remove_submission(s)
+    save()
+    return ok({'ok': True})
+
+
 # ---------- 정적 파일 ----------
 MIME = {
+    'webp': 'image/webp',
     'html': 'text/html; charset=utf-8', 'js': 'text/javascript; charset=utf-8', 'css': 'text/css; charset=utf-8',
     'json': 'application/json', 'webmanifest': 'application/manifest+json', 'svg': 'image/svg+xml', 'png': 'image/png',
     'ico': 'image/x-icon', 'pdf': 'application/pdf', 'txt': 'text/plain; charset=utf-8', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg',
@@ -1015,14 +1352,14 @@ def serve_static(req):
 # ---------- 요청 처리 ----------
 CSP = '; '.join([
     "default-src 'self'", "script-src 'self'", "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
-    "font-src 'self' https://fonts.gstatic.com", "img-src 'self' data:", "connect-src 'self'", "manifest-src 'self'",
+    "font-src 'self' https://fonts.gstatic.com", "img-src 'self' data: blob:", "connect-src 'self'", "manifest-src 'self'",
     "worker-src 'self'", "object-src 'none'", "base-uri 'self'", "form-action 'self'", "frame-ancestors 'self'",
 ])
 
 
 def dispatch(req):
     p = req.path
-    if p.startswith('/api/') or p.startswith('/download/'):
+    if p.startswith('/api/') or p.startswith('/download/') or p.startswith('/media/'):
         for method, regex, keys, fn in ROUTES:
             if method != req.method:
                 continue
@@ -1069,7 +1406,7 @@ load_db()
 
 
 def banner(port):
-    print(f'\n  연지의 영어 다이어리 실행 중 →  http://localhost:{port}\n', flush=True)
+    print(f'\n  연지쌤 영어 다이어리 실행 중 →  http://localhost:{port}\n', flush=True)
     print(f"  학생 참여 코드: {db['settings']['classCode']}", flush=True)
     if not db['settings'].get('teacherHash'):
         print('  선생님 비밀번호가 아직 없어요. 처음 접속해서 ‘선생님’ 탭에서 만들어 주세요.', flush=True)

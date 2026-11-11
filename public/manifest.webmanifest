@@ -1,14 +1,14 @@
 {
-  "name": "연지의 영어 다이어리",
-  "short_name": "영어 다이어리",
+  "name": "연지쌤 영어 다이어리",
+  "short_name": "연지쌤 영어",
   "description": "조종중학교 이연지 선생님과 함께 펼쳐 보는 영어 수업 다이어리",
   "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#fdf9ef",
-  "theme_color": "#2f6b4f",
+  "background_color": "#fff8f9",
+  "theme_color": "#f4d5dd",
   "lang": "ko",
   "icons": [
     { "src": "/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },

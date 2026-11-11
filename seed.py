@@ -198,10 +198,17 @@ def create_seed(upload_dir, new_id):
         }],
         'notices': [{
             'id': new_id('n'), 'unitId': None, 'status': 'published', 'createdAt': now, 'updatedAt': now,
-            'title': '연지의 영어 다이어리에 오신 것을 환영해요!',
+            'title': '연지쌤 영어 다이어리에 오신 것을 환영해요!',
             'body': '단원을 눌러 단어 → 본문 → 문법 순서로 공부해 보세요.\n공부하다 모르는 부분은 그 단원의 ‘선생님께 질문’에 남겨 주세요. 질문과 답변은 나와 선생님만 볼 수 있어요.',
         }],
         'questions': [],
+        'assignments': [{
+            'id': new_id('as'), 'unitId': unit['id'], 'status': 'published', 'createdAt': now, 'updatedAt': now,
+            'dueDate': time.strftime('%Y-%m-%d', time.localtime(time.time() + 7 * 86400)),
+            'title': '샘플 과제 · 단어 5개 써서 사진 올리기',
+            'description': 'Our Garden Diary 단어 중 5개를 골라 공책에 영어 단어와 뜻을 두 번씩 쓰고, 사진을 찍어 올려 주세요.\n밝은 곳에서 글씨가 잘 보이게 찍어요.',
+        }],
+        'submissions': [],
         'students': [],
         'sessions': {},
     }

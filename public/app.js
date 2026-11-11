@@ -1,5 +1,5 @@
 'use strict';
-/* 연지의 영어 다이어리 — 화면 스크립트 (학생 + 선생님) */
+/* 연지쌤 영어 다이어리 — 화면 스크립트 (학생 + 선생님) */
 (function () {
   const app = document.getElementById('app');
   const toastEl = document.getElementById('toast');
@@ -56,6 +56,9 @@
     screen: svg('<rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/>'),
     eye: svg('<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>'),
     pin: svg('<path d="M9 4h6l-1 5 3 3v2H7v-2l3-3z"/><path d="M12 14v6"/>'),
+    camera: svg('<path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>'),
+    image: svg('<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-8 8"/>'),
+    hw: svg('<path d="M9 3.5h6v3H9z"/><path d="M7 5H5.5v16h13V5H17"/><path d="m8.5 12.5 2.2 2.2 4.3-4.7"/>'),
   };
 
   const SECTIONS = [
@@ -65,7 +68,10 @@
     { key: 'sheets', label: '학습지', icon: 'sheet', desc: '선생님이 올린 파일 내려받기' },
     { key: 'ask', label: '선생님께 질문', icon: 'ask', desc: '모르는 내용을 바로 물어보기' },
   ];
-  const TNAV = [['', '대시보드'], ['units', '단원 관리'], ['sheets', '학습지'], ['questions', '질문함'], ['notices', '공지'], ['students', '학생'], ['settings', '설정']];
+  const TNAV = [['', '대시보드'], ['units', '단원 관리'], ['sheets', '학습지'], ['hw', '과제'], ['questions', '질문함'], ['notices', '공지'], ['students', '학생'], ['settings', '설정']];
+  const GRADE_LABEL = { excellent: '아주 잘했어요', good: '잘했어요', retry: '다시 해 봐요' };
+  const GRADE_CLASS = { excellent: 'g-excellent', good: 'g-good', retry: 'g-retry' };
+  const MAX_PHOTOS = 4;
   const CATS = ['단어', '본문', '문법', '기타'];
   const FILE_ACCEPT = '.pdf,.hwp,.hwpx,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.jpg,.jpeg,.png,.zip,.mp3,.m4a';
 
@@ -83,6 +89,7 @@
     qFilter: 'pending', sheetFilter: '', pendingCount: 0, askCat: '',
     route: [], lastHash: '', renderedHash: null,
     loginMode: 'student', installEvt: null, teacherSetup: null,
+    hwDraft: null, hwFilter: 'waiting', editingAssignment: null, assignmentsCache: [], hwWaiting: 0, hwNew: 0,
   };
 
   // ---------- 서버 통신 ----------
@@ -151,6 +158,7 @@
     const r = parseHash();
     S.route = r;
     S.lastHash = location.hash || '#/';
+    closeZoom();
     if (!(r[0] === 'u' && r[2] === 'passage')) exitClassMode();
     if (!S.token) { document.body.classList.remove('loading'); return viewLogin(); }
     document.body.classList.add('loading');
@@ -170,6 +178,8 @@
       } else if (r[0] === 'my-questions') {
         if (teacher) return nav('#/t/questions');
         await viewMyQuestions(seq);
+      } else if (r[0] === 'hw') {
+        if (r[1]) await viewAssignment(r[1], seq); else await viewHomework(seq);
       } else if (teacher && r[0] !== 's') {
         return nav('#/t');
       } else {
@@ -212,9 +222,9 @@
     const inAdmin = S.route[0] === 't';
     return `
     <header class="topbar">
-      <a class="brand" href="${teacher ? '#/t' : '#/'}" aria-label="연지의 영어 다이어리 처음 화면">
+      <a class="brand" href="${teacher ? '#/t' : '#/'}" aria-label="연지쌤 영어 다이어리 처음 화면">
         <span class="brand-mark">${ICON.book}</span>
-        <span class="brand-text"><b>연지의 영어 다이어리</b><small>이연지 선생님</small></span>
+        <span class="brand-text"><b>연지쌤 영어 다이어리</b><small>이연지 선생님</small></span>
       </a>
       <div class="who">
         ${teacher
@@ -233,6 +243,7 @@
     const cur = S.boot ? S.boot.currentUnitId : null;
     const homeHref = S.me && S.me.role === 'teacher' ? '#/s' : '#/';
     const items = [`<a class="itab home ${!activeId ? 'on' : ''}" href="${homeHref}" ${!activeId ? 'aria-current="page"' : ''}><span class="num">✎</span><span class="t-title">홈</span></a>`];
+    items.push(`<a class="itab hw ${activeId === 'hw' ? 'on' : ''}" href="#/hw" ${activeId === 'hw' ? 'aria-current="page"' : ''}><span class="num">✓</span><span class="t-title always">과제</span>${S.hwNew ? `<span class="tab-count" aria-label="새 피드백 ${S.hwNew}개">${S.hwNew}</span>` : ''}</a>`);
     units.forEach((u, i) => {
       const on = u.id === activeId;
       items.push(`<a class="itab ${on ? 'on' : ''}" style="--tab-c:var(--tab${(i % 5) + 1})" href="#/u/${encodeURIComponent(u.id)}" title="${esc(u.title)}" aria-label="${i + 1}단원 ${esc(u.title)}" ${on ? 'aria-current="page"' : ''}>
@@ -242,7 +253,7 @@
   }
   function teacherTabs(active) {
     return TNAV.map(([k, l], i) => `<a class="itab ${k === active ? 'on' : ''}" style="--tab-c:var(--tab${(i % 5) + 1})" href="#/t${k ? `/${k}` : ''}" ${k === active ? 'aria-current="page"' : ''}>
-      <span class="t-title always">${l}</span>${k === 'questions' && S.pendingCount ? `<span class="tab-count" aria-label="답변 대기 ${S.pendingCount}개">${S.pendingCount}</span>` : ''}</a>`).join('');
+      <span class="t-title always">${l}</span>${k === 'questions' && S.pendingCount ? `<span class="tab-count" aria-label="답변 대기 ${S.pendingCount}개">${S.pendingCount}</span>` : ''}${k === 'hw' && S.hwWaiting ? `<span class="tab-count" aria-label="피드백 대기 ${S.hwWaiting}개">${S.hwWaiting}</span>` : ''}</a>`).join('');
   }
   const empty = (msg, extra) => `<div class="empty"><p>${msg}</p>${extra || ''}</div>`;
   function noticeCard(n) {
@@ -289,7 +300,7 @@
       <div class="cover">
         <div class="cover-label">
           <span class="cover-small">조종중학교 영어 수업</span>
-          <h1>연지의 영어 다이어리</h1>
+          <h1>연지쌤 영어 다이어리</h1>
           <span class="cover-small">이연지 선생님</span>
         </div>
         <div class="login-paper">
@@ -338,7 +349,22 @@
 
   async function viewHome(seq) {
     const student = S.me.role === 'student';
-    const [boot, qs] = await Promise.all([loadBoot(true), student ? api('GET', '/api/questions') : Promise.resolve({ questions: [] })]);
+    const [boot, qs, hw] = await Promise.all([
+      loadBoot(true),
+      student ? api('GET', '/api/questions') : Promise.resolve({ questions: [] }),
+      student ? api('GET', '/api/assignments') : Promise.resolve({ assignments: [] }),
+    ]);
+    const hwSeen = hwSeenSet();
+    S.hwNew = hw.assignments.filter((a) => isNewFeedback(a.mine, hwSeen)).length;
+    const hwCard = student ? `
+      <section class="card hw-sum">
+        <div class="card-head"><h2>과제</h2><a class="link" href="#/hw">과제 모두 보기</a></div>
+        ${S.hwNew ? `<p class="hw-new">새 피드백이 ${S.hwNew}개 왔어요!</p>` : ''}
+        ${hw.assignments.length ? `<ul class="hw-mini">${hw.assignments.slice(0, 3).map((a) => `
+          <li><a href="#/hw/${encodeURIComponent(a.id)}"><b>${esc(a.title)}</b>${dueInfo(a.dueDate)}${hwStatusBadge(a.mine)}</a></li>`).join('')}</ul>`
+        : '<p class="empty-sm">지금 낼 과제가 없어요.</p>'}
+      </section>` : `
+      <section class="card hw-sum"><h2>과제</h2><p class="hint">과제 만들기와 평가는 관리 화면의 ‘과제’에서 해요.</p><a class="btn block" href="#/t/hw">과제 관리 열기</a></section>`;
     const cur = boot.units.find((u) => u.id === boot.currentUnitId);
     const seen = seenSet();
     const newAns = qs.questions.filter((q) => isNewAnswer(q, seen)).length;
@@ -389,7 +415,7 @@
       ${nowCard}
       <div class="home-grid">
         <section class="notes"><h2>선생님 공지</h2>${notices.length ? notices.map(noticeCard).join('') : '<p class="empty-sm">새 공지가 없어요.</p>'}</section>
-        ${qCard}
+        <div class="side-col">${hwCard}${qCard}</div>
       </div>
       <section class="mt"><h2>전체 단원</h2><div class="unit-list">${unitList}</div></section>`;
     paint(seq, shell({ tabs: studentTabs(null), body }));
@@ -679,6 +705,271 @@
     if (paint(seq, shell({ tabs: studentTabs(null), body }))) markSeen(questions);
   }
 
+  // ---------- 과제 (학생: 사진 제출 / 선생님: 평가·피드백) ----------
+  function studentNo(me) { return `${me.grade}${String(me.klass).padStart(2, '0')}${String(me.number).padStart(2, '0')}`; }
+  function dueEnd(due) { return new Date(`${due}T23:59:59`).getTime(); }
+  function dueInfo(due) {
+    if (!due) return '';
+    const day = new Date(`${due}T00:00:00`);
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const days = Math.round((day - today) / 86400000);
+    const label = `${day.getMonth() + 1}월 ${day.getDate()}일`;
+    if (Date.now() > dueEnd(due)) return `<span class="due over">마감 ${label} (지남)</span>`;
+    return `<span class="due ${days <= 1 ? 'soon' : ''}">마감 ${label} ${days === 0 ? '(오늘)' : `(D-${days})`}</span>`;
+  }
+  const isLate = (sub, due) => !!due && (sub.updatedAt || sub.createdAt) > dueEnd(due);
+  function hwStatusBadge(mine) {
+    if (!mine) return '<span class="badge todo">아직 안 냈어요</span>';
+    if (mine.status === 'submitted') return mine.grade === 'retry' ? '<span class="badge wait">다시 냈어요 · 확인 기다리는 중</span>' : '<span class="badge pub">냈어요 · 확인 기다리는 중</span>';
+    return `<span class="badge grade ${GRADE_CLASS[mine.grade] || ''}">${esc(GRADE_LABEL[mine.grade] || '평가 완료')}</span>`;
+  }
+  function hwSeenKey() { return `${seenKey()}_hw`; }
+  function hwSeenSet() { try { return new Set(JSON.parse(ls.get(hwSeenKey()) || '[]')); } catch (e) { return new Set(); } }
+  const isNewFeedback = (mine, seen) => !!mine && mine.status === 'reviewed' && !(seen || hwSeenSet()).has(`${mine.id}:${mine.reviewedAt}`);
+  function markFeedbackSeen(sub) {
+    if (!sub || sub.status !== 'reviewed' || !S.me || S.me.role !== 'student') return;
+    const seen = hwSeenSet();
+    const key = `${sub.id}:${sub.reviewedAt}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    ls.set(hwSeenKey(), JSON.stringify([...seen].slice(-400)));
+    S.hwNew = Math.max(0, S.hwNew - 1);
+    const badge = document.querySelector('.itab.hw .tab-count');
+    if (badge) { if (S.hwNew) badge.textContent = S.hwNew; else badge.remove(); }
+  }
+  function photoGrid(photos) {
+    if (!photos || !photos.length) return '';
+    return `<div class="photo-grid">${photos.map((p, i) => `
+      <button type="button" class="thumb" data-act="zoom" data-src="${esc(p.url)}" aria-label="사진 ${i + 1} 크게 보기"><img src="${esc(p.url)}" alt="제출한 사진 ${i + 1}" loading="lazy"></button>`).join('')}</div>`;
+  }
+  function draftPreviews() {
+    const d = S.hwDraft;
+    if (!d || !d.photos.length) return '<p class="empty-sm">아직 고른 사진이 없어요.</p>';
+    return d.photos.map((p, i) => `
+      <div class="pv-photo"><img src="${esc(p.dataUrl)}" alt="고른 사진 ${i + 1}">
+        <button type="button" class="icon-btn danger" data-act="hwRemovePhoto" data-i="${i}" aria-label="사진 ${i + 1} 빼기">${ICON.x}</button></div>`).join('');
+  }
+  function updatePreviews() {
+    const box = document.getElementById('hwPreviews');
+    if (box) box.innerHTML = draftPreviews();
+  }
+  // 휴대폰 사진은 커서(3~12MB) 화면에서 긴 쪽 1280px JPG로 줄여요. 위치 정보(EXIF)도 함께 지워져요.
+  function compressImage(file, maxSide = 1280, quality = 0.72) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+          const w = Math.max(1, Math.round(img.naturalWidth * scale));
+          const h = Math.max(1, Math.round(img.naturalHeight * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve({ dataUrl: canvas.toDataURL('image/jpeg', quality), w, h });
+        } catch (e) {
+          reject(new Error('사진을 줄이지 못했어요. 다른 사진으로 해 주세요.'));
+        } finally {
+          URL.revokeObjectURL(url);
+        }
+      };
+      img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('이 사진은 열 수 없어요. JPG나 PNG 사진으로 올려 주세요.')); };
+      img.src = url;
+    });
+  }
+  async function addHwPhotos(files) {
+    const d = S.hwDraft;
+    const list = [...(files || [])];
+    if (!d || !list.length) return;
+    const room = MAX_PHOTOS - d.photos.length;
+    if (room <= 0) { toast(`사진은 ${MAX_PHOTOS}장까지 올릴 수 있어요.`, 'err'); return; }
+    if (list.length > room) toast(`사진은 ${MAX_PHOTOS}장까지예요. 앞의 ${room}장만 넣을게요.`);
+    const box = document.getElementById('hwPreviews');
+    if (box) box.insertAdjacentHTML('beforeend', '<p class="hint">사진을 줄이는 중…</p>');
+    for (const f of list.slice(0, room)) {
+      try { d.photos.push(await compressImage(f)); } catch (e) { toast(e.message, 'err'); }
+    }
+    updatePreviews();
+  }
+  function openZoom(src) {
+    closeZoom();
+    const box = document.createElement('div');
+    box.className = 'zoom';
+    box.id = 'zoomBox';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-label', '사진 크게 보기');
+    box.innerHTML = `<button type="button" class="btn zoom-close" data-act="closeZoom">닫기 ✕</button><img src="${esc(src)}" alt="크게 본 사진" data-act="closeZoom">`;
+    document.body.appendChild(box);
+    box.querySelector('.zoom-close').focus();
+  }
+  function closeZoom() { const z = document.getElementById('zoomBox'); if (z) z.remove(); }
+
+  async function viewHomework(seq) {
+    const [, { assignments }] = await Promise.all([loadBoot(), api('GET', '/api/assignments')]);
+    const teacher = S.me.role === 'teacher';
+    const seen = hwSeenSet();
+    S.hwNew = teacher ? 0 : assignments.filter((a) => isNewFeedback(a.mine, seen)).length;
+    const body = `
+      <a class="back" href="${teacher ? '#/s' : '#/'}">← 홈</a>
+      <h1>과제</h1>
+      <p class="hint">${teacher ? '학생에게 보이는 과제 목록이에요. 과제 만들기와 평가는 관리 화면의 ‘과제’에서 해요.' : '과제를 눌러 사진을 올리고, 선생님 피드백을 확인해요. 내가 낸 과제는 나와 이연지 선생님만 볼 수 있어요.'}</p>
+      ${assignments.length ? `<div class="hw-list">${assignments.map((a) => `
+        <a class="card hw-card" href="#/hw/${encodeURIComponent(a.id)}">
+          <span class="hw-icon">${ICON.hw}</span>
+          <span class="hw-text"><b>${esc(a.title)}</b>
+            <span class="hw-meta">${a.unitTitle ? `<span class="en">${esc(a.unitTitle)}</span>` : ''}${dueInfo(a.dueDate)}</span></span>
+          ${teacher ? (a.status !== 'published' ? '<span class="badge draft">작성 중</span>' : '') : hwStatusBadge(a.mine)}
+          ${isNewFeedback(a.mine, seen) ? '<span class="badge new">새 피드백</span>' : ''}
+        </a>`).join('')}</div>` : empty('지금 낼 과제가 없어요.')}`;
+    paint(seq, shell({ tabs: studentTabs('hw'), body }));
+  }
+
+  async function viewAssignment(id, seq) {
+    const [, data] = await Promise.all([loadBoot(), api('GET', `/api/assignments/${encodeURIComponent(id)}`)]);
+    const a = data.assignment;
+    const sub = data.submission;
+    const teacher = S.me.role === 'teacher';
+    if (!S.hwDraft || S.hwDraft.assignmentId !== a.id) S.hwDraft = { assignmentId: a.id, photos: [] };
+    const canSubmit = !teacher && (!sub || sub.status === 'submitted' || sub.grade === 'retry');
+    const mine = sub ? `
+      <section class="card my-sub">
+        <div class="card-head"><h2>내가 낸 과제</h2>${hwStatusBadge(sub)}</div>
+        <p class="meta">${fmtDate(sub.updatedAt || sub.createdAt)}에 냈어요${isLate(sub, a.dueDate) ? ' · <span class="warn-inline">마감 뒤에 냈어요</span>' : ''}</p>
+        ${photoGrid(sub.photos)}
+        ${sub.text ? `<p class="sub-text">${nl2br(sub.text)}</p>` : ''}
+        ${sub.grade ? `<div class="feedback-box ${GRADE_CLASS[sub.grade] || ''}">
+          <span class="answer-label">이연지 선생님 평가 · ${fmtDate(sub.reviewedAt)}</span>
+          <b class="grade-big">${esc(sub.gradeLabel)}</b>
+          ${sub.feedback ? `<p>${nl2br(sub.feedback)}</p>` : ''}
+          ${sub.status === 'submitted' ? '<p class="hint">고쳐서 다시 냈어요. 선생님이 다시 확인할 거예요.</p>' : ''}
+        </div>` : '<p class="hint">선생님이 확인하면 여기에 평가와 피드백이 나와요.</p>'}
+        ${canSubmit ? `<button class="btn sm ghost danger" data-act="delMySubmission" data-id="${esc(a.id)}">낸 과제 지우기</button>` : ''}
+      </section>` : '';
+    const form = canSubmit ? `
+      <form class="card hw-form" data-form="hwSubmit" data-id="${esc(a.id)}">
+        <h2>${sub ? '고쳐서 다시 내기' : '과제 내기'}</h2>
+        <div class="who-box">제출하는 사람 <b>${esc(S.me.grade)}학년 ${esc(S.me.klass)}반 ${esc(S.me.number)}번 ${esc(S.me.name)}</b> <span class="meta">(학번 ${studentNo(S.me)})</span></div>
+        <div class="field"><span>사진 <small>최대 ${MAX_PHOTOS}장 · 자동으로 작게 줄여서 올려요</small></span>
+          <div class="photo-pick">
+            <label class="btn">${ICON.camera}<span>사진 찍기</span><input type="file" accept="image/*" capture="environment" class="sr-only" data-hw-photos></label>
+            <label class="btn">${ICON.image}<span>앨범에서 고르기</span><input type="file" accept="image/*" multiple class="sr-only" data-hw-photos></label>
+          </div>
+          <div class="photo-previews" id="hwPreviews">${draftPreviews()}</div>
+        </div>
+        <label class="field"><span>하고 싶은 말 <small>선택</small></span><textarea name="text" rows="3" maxlength="1000" placeholder="예) 3번 문제가 조금 어려웠어요."></textarea></label>
+        <label class="field"><span>개인 비밀번호 (PIN 4자리) <small>로그인할 때 쓰는 번호</small></span><input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off"></label>
+        <button class="btn primary block lg" type="submit">${ICON.upload}<span>${sub ? '다시 내기' : '과제 내기'}</span></button>
+        <p class="hint center">내가 낸 과제는 나와 이연지 선생님만 볼 수 있어요.</p>
+      </form>` : (teacher ? '<p class="preview-note">학생 계정에서 과제를 낼 수 있어요. 낸 과제는 관리 화면의 ‘과제’에서 평가해요.</p>' : '');
+    const body = `
+      <a class="back" href="#/hw">← 과제 목록</a>
+      <p class="unit-kicker"><span>과제</span>${a.unitTitle ? `<span class="badge cat en">${esc(a.unitTitle)}</span>` : ''}${a.status !== 'published' ? '<span class="badge draft">작성 중 · 학생에게 안 보여요</span>' : ''}</p>
+      <h1>${esc(a.title)}</h1>
+      ${a.dueDate ? `<p>${dueInfo(a.dueDate)}</p>` : ''}
+      ${a.description ? `<div class="card concept">${nl2br(a.description)}</div>` : ''}
+      <div class="hw-grid">${mine}${form}</div>`;
+    if (paint(seq, shell({ tabs: studentTabs('hw'), body }))) markFeedbackSeen(sub);
+  }
+
+  async function tHomework(seq) {
+    const data = await api('GET', '/api/admin/assignments');
+    S.assignmentsCache = data.assignments;
+    S.hwWaiting = data.assignments.reduce((n, a) => n + a.counts.waiting, 0);
+    const editing = S.editingAssignment ? data.assignments.find((a) => a.id === S.editingAssignment) : null;
+    const d = editing || { title: '', description: '', unitId: '', dueDate: '', status: 'draft' };
+    const used = data.storage.usedBytes;
+    const quota = data.storage.quotaBytes;
+    const pct = Math.min(100, Math.round((used / quota) * 100));
+    const body = `
+      <h1>과제</h1>
+      <p class="hint">과제를 만들면 학생들이 사진으로 내요. 낸 과제는 그 학생과 선생님만 볼 수 있고, 평가와 피드백을 남기면 학생이 확인해요.</p>
+      <div class="card storage">
+        <div class="storage-head"><b>사진 저장 공간</b><span>${fmtSize(used)} / ${fmtSize(quota)} (${pct}%)</span></div>
+        <div class="progress" aria-hidden="true"><i style="width:${pct}%"></i></div>
+        ${pct >= 80 ? '<p class="warn-sm">저장 공간이 많이 찼어요. 끝난 과제를 지우면 그 사진들도 함께 지워져서 공간이 생겨요.</p>' : ''}
+      </div>
+      <div class="two-col">
+        <form class="card" data-form="assignment" id="assignmentForm">
+          <h2>${editing ? '과제 고치기' : '새 과제 만들기'}</h2>
+          <label class="field"><span>과제 제목</span><input type="text" name="title" maxlength="150" required value="${esc(d.title)}" placeholder="예) Lesson 1 단어 쓰기"></label>
+          <label class="field"><span>설명 <small>무엇을 하고 어떻게 찍어 올릴지</small></span><textarea name="description" rows="5" maxlength="3000">${esc(d.description)}</textarea></label>
+          <div class="row">
+            <label class="field"><span>관련 단원 <small>선택</small></span><select name="unitId">${unitOptions(data.units, d.unitId || '', '단원 없음')}</select></label>
+            <label class="field"><span>마감일 <small>선택</small></span><input type="date" name="dueDate" value="${esc(d.dueDate)}"></label>
+          </div>
+          <fieldset class="chip-pick"><legend>공개 상태</legend>
+            <label class="chip-radio"><input type="radio" name="status" value="draft" ${d.status !== 'published' ? 'checked' : ''}><span>작성 중으로 저장</span></label>
+            <label class="chip-radio"><input type="radio" name="status" value="published" ${d.status === 'published' ? 'checked' : ''}><span>학생에게 공개</span></label>
+          </fieldset>
+          <div class="btn-row"><button class="btn primary" type="submit">${editing ? '고친 내용 저장' : '과제 만들기'}</button>${editing ? '<button class="btn ghost" type="button" data-act="cancelAssignment">새로 만들기</button>' : ''}</div>
+        </form>
+        <section>
+          <h2>만든 과제 <span class="count-pill">${data.assignments.length}</span></h2>
+          ${data.assignments.length ? data.assignments.map((a) => `
+            <article class="card hw-admin">
+              <div class="hw-admin-head"><h3>${esc(a.title)}</h3><span class="badge ${a.status === 'published' ? 'pub' : 'draft'}">${a.status === 'published' ? '공개' : '작성 중'}</span></div>
+              <p class="meta">${a.unitTitle ? `<span class="en">${esc(a.unitTitle)}</span> · ` : ''}${a.dueDate ? `${dueInfo(a.dueDate)} · ` : ''}낸 학생 ${a.counts.submitted}명${a.counts.waiting ? ` · <b class="warn-inline">피드백 기다림 ${a.counts.waiting}</b>` : ''}</p>
+              <div class="btn-row">
+                <a class="btn sm primary" href="#/t/hw/${encodeURIComponent(a.id)}">낸 과제 보기 · 평가</a>
+                <button class="btn sm" data-act="editAssignment" data-id="${esc(a.id)}">고치기</button>
+                <button class="btn sm" data-act="toggleAssignment" data-id="${esc(a.id)}">${a.status === 'published' ? '작성 중으로 되돌리기' : '학생에게 공개'}</button>
+                <button class="btn sm ghost danger" data-act="delAssignment" data-id="${esc(a.id)}" data-title="${esc(a.title)}">삭제</button>
+              </div>
+            </article>`).join('') : empty('아직 만든 과제가 없어요. 왼쪽에서 첫 과제를 만들어 보세요.')}
+        </section>
+      </div>`;
+    paint(seq, tShell('hw', body));
+  }
+
+  function reviewCard(s, a) {
+    return `<article class="card review">
+      <div class="qmeta">
+        <span class="qstudent">${esc(s.student)}</span>
+        <span class="qdate">${fmtDate(s.updatedAt || s.createdAt)}</span>
+        ${s.resubmitted ? '<span class="badge wait">다시 낸 과제</span>' : ''}
+        ${isLate(s, a.dueDate) ? '<span class="badge draft">마감 뒤에 냄</span>' : ''}
+        ${s.status === 'reviewed' ? `<span class="badge grade ${GRADE_CLASS[s.grade] || ''}">${esc(s.gradeLabel)}</span>` : '<span class="badge new">피드백 기다림</span>'}
+      </div>
+      ${photoGrid(s.photos)}
+      ${s.text ? `<p class="sub-text">${nl2br(s.text)}</p>` : ''}
+      <form class="review-form" data-form="review" data-id="${esc(s.id)}">
+        <fieldset class="chip-pick"><legend>평가</legend>
+          ${Object.entries(GRADE_LABEL).map(([k, l]) => `<label class="chip-radio"><input type="radio" name="grade" value="${k}" ${s.grade === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+        </fieldset>
+        <label class="field"><span>피드백</span><textarea name="feedback" rows="3" maxlength="3000" placeholder="잘한 점과 고칠 점을 적어 주세요.">${esc(s.feedback)}</textarea></label>
+        <div class="btn-row">
+          <button class="btn primary sm" type="submit">${s.status === 'reviewed' ? '평가 고치기' : '피드백 보내기'}</button>
+          <button class="btn sm ghost danger" type="button" data-act="delSubmissionT" data-id="${esc(s.id)}">삭제</button>
+        </div>
+      </form>
+    </article>`;
+  }
+
+  async function tHomeworkDetail(id, seq) {
+    const data = await api('GET', `/api/admin/assignments/${encodeURIComponent(id)}/submissions`);
+    const a = data.assignment;
+    const waiting = data.submissions.filter((s) => s.status === 'submitted');
+    const list = S.hwFilter === 'waiting' ? waiting : data.submissions;
+    const body = `
+      <a class="back" href="#/t/hw">← 과제 목록</a>
+      <h1>${esc(a.title)}</h1>
+      <p class="meta">${a.dueDate ? `${dueInfo(a.dueDate)} · ` : ''}낸 학생 ${data.submissions.length}명 · 피드백 기다림 ${waiting.length}명</p>
+      ${a.description ? `<details class="card"><summary>과제 설명 보기</summary><p>${nl2br(a.description)}</p></details>` : ''}
+      <div class="seg small" role="tablist" aria-label="낸 과제 거르기">
+        <button type="button" role="tab" aria-selected="${S.hwFilter === 'waiting'}" class="${S.hwFilter === 'waiting' ? 'on' : ''}" data-act="hwFilter" data-f="waiting">피드백 기다림 ${waiting.length}</button>
+        <button type="button" role="tab" aria-selected="${S.hwFilter === 'all'}" class="${S.hwFilter === 'all' ? 'on' : ''}" data-act="hwFilter" data-f="all">전체 ${data.submissions.length}</button>
+      </div>
+      ${list.length ? list.map((s) => reviewCard(s, a)).join('') : empty(S.hwFilter === 'waiting' ? '피드백을 기다리는 과제가 없어요.' : '아직 낸 학생이 없어요.')}
+      ${data.notSubmitted.length ? `<details class="card"><summary>아직 안 낸 학생 ${data.notSubmitted.length}명 <small>(접속한 적 있는 학생 중)</small></summary>
+        <p class="chips">${data.notSubmitted.map((n) => `<span class="badge cat">${esc(n)}</span>`).join(' ')}</p></details>` : ''}`;
+    paint(seq, tShell('hw', body));
+  }
+
   // ---------- 선생님 ----------
   async function teacherRoute(r, seq) {
     const sub = r[1] || '';
@@ -690,6 +981,8 @@
     if (sub === 'notices') return tNotices(seq);
     if (sub === 'students') return tStudents(seq);
     if (sub === 'settings') return tSettings(seq);
+    if (sub === 'hw' && r[2]) return tHomeworkDetail(r[2], seq);
+    if (sub === 'hw') return tHomework(seq);
     return nav('#/t');
   }
   const tShell = (active, body) => shell({ tabs: teacherTabs(active), body });
@@ -734,12 +1027,14 @@
     const o = await api('GET', '/api/admin/overview');
     S.adminUnits = o.units;
     S.pendingCount = o.pending.length;
+    S.hwWaiting = o.hwWaiting || 0;
     const cur = o.units.find((u) => u.id === o.currentUnitId);
     const shown = o.pending.slice(0, 3);
     const body = `
       ${o.defaultPassword ? '<div class="alert">지금 기본 비밀번호(teacher1234)를 쓰고 있어요. 학생에게 주소를 알려 주기 전에 <a href="#/t/settings">설정</a>에서 꼭 바꿔 주세요.</div>' : ''}
       <p class="date-line">${todayStr()}</p>
       <h1>이연지 선생님의 수업 다이어리</h1>
+      ${S.hwWaiting ? `<a class="card hw-alert" href="#/t/hw">${ICON.hw}<span>피드백을 기다리는 과제가 ${S.hwWaiting}개 있어요 → 과제 열기</span></a>` : ''}
       <div class="dash">
         <section class="card dash-q" aria-labelledby="dq">
           <div class="card-head"><h2 id="dq">답변을 기다리는 질문 <span class="count-pill">${o.pending.length}</span></h2><a class="link" href="#/t/questions">질문함 전체 보기</a></div>
@@ -1195,7 +1490,7 @@
 
   async function tSettings(seq) {
     const s = await api('GET', '/api/admin/settings');
-    const invite = `[연지의 영어 다이어리]\n주소: ${location.origin}\n참여 코드: ${s.classCode}\n처음 접속할 때 학년·반·번호·이름을 넣고, 나만 아는 PIN 4자리를 정하세요.`;
+    const invite = `[연지쌤 영어 다이어리]\n주소: ${location.origin}\n참여 코드: ${s.classCode}\n처음 접속할 때 학년·반·번호·이름을 넣고, 나만 아는 PIN 4자리를 정하세요.`;
     const body = `
       <h1>설정</h1>
       ${s.defaultPassword ? '<div class="alert">기본 비밀번호(teacher1234)를 쓰고 있어요. 아래에서 꼭 바꿔 주세요.</div>' : ''}
@@ -1530,6 +1825,46 @@
       toast('학생을 삭제했어요.');
       render();
     },
+    // 과제
+    hwRemovePhoto: (el) => { if (S.hwDraft) { S.hwDraft.photos.splice(+el.dataset.i, 1); updatePreviews(); } },
+    zoom: (el) => openZoom(el.dataset.src),
+    closeZoom: () => closeZoom(),
+    delMySubmission: async (el) => {
+      if (!confirm('낸 과제를 지울까요? 올린 사진도 함께 지워져요.')) return;
+      await api('DELETE', `/api/assignments/${encodeURIComponent(el.dataset.id)}/submission`);
+      toast('낸 과제를 지웠어요.');
+      render();
+    },
+    editAssignment: async (el) => {
+      S.editingAssignment = el.dataset.id;
+      await render();
+      const f = document.getElementById('assignmentForm');
+      if (f) f.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+    cancelAssignment: () => { S.editingAssignment = null; render(); },
+    toggleAssignment: async (el) => {
+      const a = S.assignmentsCache.find((x) => x.id === el.dataset.id);
+      if (!a) return;
+      const next = a.status === 'published' ? 'draft' : 'published';
+      await api('PUT', `/api/admin/assignments/${encodeURIComponent(a.id)}`, { title: a.title, description: a.description, unitId: a.unitId, dueDate: a.dueDate, status: next });
+      toast(next === 'published' ? '과제를 학생에게 공개했어요.' : '과제를 작성 중으로 되돌렸어요. 학생에게 보이지 않아요.', 'ok');
+      render();
+    },
+    delAssignment: async (el) => {
+      if (!confirm(`‘${el.dataset.title}’ 과제를 삭제할까요?\n학생들이 낸 사진과 피드백도 모두 지워지고 되돌릴 수 없어요.`)) return;
+      await api('DELETE', `/api/admin/assignments/${encodeURIComponent(el.dataset.id)}`);
+      if (S.editingAssignment === el.dataset.id) S.editingAssignment = null;
+      toast('과제를 삭제했어요.');
+      render();
+    },
+    delSubmissionT: async (el) => {
+      if (!confirm('이 학생이 낸 과제를 삭제할까요? 사진도 함께 지워지고 되돌릴 수 없어요.')) return;
+      await api('DELETE', `/api/admin/submissions/${encodeURIComponent(el.dataset.id)}`);
+      toast('낸 과제를 삭제했어요.');
+      render();
+    },
+    hwFilter: (el) => { S.hwFilter = el.dataset.f; render(); },
+
     copyInvite: async (el) => {
       try { await navigator.clipboard.writeText(el.dataset.text); toast('안내 문구를 복사했어요.', 'ok'); } catch (e) { toast('복사하지 못했어요. 글자를 직접 선택해 복사해 주세요.', 'err'); }
     },
@@ -1543,6 +1878,34 @@
 
   // ---------- 폼 제출 ----------
   const FORM = {
+    hwSubmit: async (form, d) => {
+      const draft = S.hwDraft;
+      if (!draft || draft.assignmentId !== form.dataset.id) throw new Error('화면을 새로고침한 뒤 다시 해 주세요.');
+      if (!draft.photos.length && !(d.text || '').trim()) throw new Error('사진을 올리거나 하고 싶은 말을 적어 주세요.');
+      if (!/^\d{4}$/.test(d.pin || '')) throw new Error('개인 비밀번호(PIN) 숫자 4자리를 넣어 주세요.');
+      const btn = form.querySelector('[type=submit]');
+      if (btn) btn.innerHTML = '올리는 중…';
+      await api('POST', `/api/assignments/${encodeURIComponent(form.dataset.id)}/submission`, {
+        pin: d.pin, text: d.text || '', photos: draft.photos.map((p) => p.dataUrl),
+      });
+      S.hwDraft = null;
+      toast('과제를 냈어요! 선생님이 확인하면 여기에서 피드백을 볼 수 있어요.', 'ok');
+      render();
+    },
+    assignment: async (form, d) => {
+      const payload = { title: d.title, description: d.description, unitId: d.unitId || null, dueDate: d.dueDate || '', status: d.status };
+      if (S.editingAssignment) await api('PUT', `/api/admin/assignments/${encodeURIComponent(S.editingAssignment)}`, payload);
+      else await api('POST', '/api/admin/assignments', payload);
+      S.editingAssignment = null;
+      toast(d.status === 'published' ? '과제를 저장하고 학생에게 공개했어요.' : '과제를 작성 중으로 저장했어요. 준비되면 공개해 주세요.', 'ok');
+      render();
+    },
+    review: async (form, d) => {
+      if (!d.grade) throw new Error('평가(아주 잘했어요·잘했어요·다시 해 봐요)를 골라 주세요.');
+      await api('POST', `/api/admin/submissions/${encodeURIComponent(form.dataset.id)}/review`, { grade: d.grade, feedback: d.feedback || '' });
+      toast('평가와 피드백을 보냈어요. 학생이 다시 접속하면 볼 수 있어요.', 'ok');
+      render();
+    },
     studentLogin: async (form, d) => {
       if (!d.classCode.trim() || !d.klass || !d.number || !d.name.trim()) throw new Error('참여 코드, 반, 번호, 이름을 모두 입력해 주세요.');
       if (!/^\d{4}$/.test(d.pin)) throw new Error('PIN은 숫자 4자리로 입력해 주세요.');
@@ -1688,12 +2051,17 @@
         toast(`‘${f.name}’ 파일로 교체했어요.`, 'ok');
         render();
       } catch (e) { toast(e.message, 'err'); }
+    } else if (t.dataset && t.dataset.hwPhotos !== undefined) {
+      const files = [...(t.files || [])];
+      t.value = '';
+      await addHwPhotos(files);
     } else if (t.dataset && t.dataset.filter === 'sheet') {
       S.sheetFilter = t.value;
       render();
     }
   });
   document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.getElementById('zoomBox')) { closeZoom(); return; }
     const tag = (e.target.tagName || '').toLowerCase();
     if (['input', 'textarea', 'select'].includes(tag) || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return;
     if (S.route[0] === 'u' && S.route[2] === 'words' && S.words) {
