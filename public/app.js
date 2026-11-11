@@ -82,7 +82,7 @@
     adminUnits: [], qCache: {}, noticesCache: [], noticeDraft: null, editingNotice: null, editingSheet: null,
     qFilter: 'pending', sheetFilter: '', pendingCount: 0, askCat: '',
     route: [], lastHash: '', renderedHash: null,
-    loginMode: 'student', installEvt: null,
+    loginMode: 'student', installEvt: null, teacherSetup: null,
   };
 
   // ---------- 서버 통신 ----------
@@ -97,7 +97,11 @@
     let data = {};
     try { data = await res.json(); } catch (e) { /* 빈 응답 */ }
     if (res.status === 401) { clearSession(); setTimeout(render, 0); throw new Error(data.error || '다시 로그인해 주세요.'); }
-    if (!res.ok) throw new Error(data.error || '문제가 생겼어요. 다시 시도해 주세요.');
+    if (!res.ok) {
+      const err = new Error(data.error || '문제가 생겼어요. 다시 시도해 주세요.');
+      err.status = res.status;
+      throw err;
+    }
     return data;
   }
   function setSession(token) { S.token = token; ls.set('yd_token', token); S.me = null; invalidate(); }
@@ -267,7 +271,14 @@
         <p class="hint">처음 들어올 때 입력한 PIN이 내 비밀번호가 돼요. 친구에게 알려 주지 마세요. 잊어버리면 선생님께 초기화를 부탁하세요.</p>
         <button class="btn primary block lg" type="submit">다이어리 펼치기</button>
       </form>`;
-    const teacherForm = `
+    const teacherForm = S.teacherSetup === null ? '<p class="hint center">확인하는 중…</p>' : S.teacherSetup ? `
+      <form data-form="teacherSetup" autocomplete="on">
+        <p class="setup-note"><b>처음 오셨군요!</b> 이 다이어리의 관리 화면에 들어갈 때 쓸 <b>선생님 비밀번호</b>를 만들어 주세요. 잊지 않게 따로 적어 두세요.</p>
+        <input type="text" name="username" value="teacher" autocomplete="username" hidden>
+        <label class="field"><span>새 비밀번호 <small>8자 이상</small></span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+        <label class="field"><span>새 비밀번호 한 번 더</span><input type="password" name="password2" required minlength="8" autocomplete="new-password"></label>
+        <button class="btn primary block lg" type="submit">비밀번호 만들고 시작하기</button>
+      </form>` : `
       <form data-form="teacherLogin" autocomplete="on">
         <input type="text" name="username" value="teacher" autocomplete="username" hidden>
         <label class="field"><span>선생님 비밀번호</span><input type="password" name="password" required autocomplete="current-password"></label>
@@ -290,6 +301,16 @@
         </div>
       </div>
     </div>`;
+    if (mode === 'teacher' && S.teacherSetup === null) checkTeacherSetup();
+  }
+  async function checkTeacherSetup() {
+    try {
+      const r = await api('GET', '/api/setup-status');
+      S.teacherSetup = !!r.needsTeacherPassword;
+    } catch (e) {
+      S.teacherSetup = false;
+    }
+    if (!S.token && S.loginMode === 'teacher') viewLogin();
   }
 
   // ---------- 학생: 홈 ----------
@@ -1533,8 +1554,24 @@
       render();
     },
     teacherLogin: async (form, d) => {
-      const r = await api('POST', '/api/login/teacher', { password: d.password });
+      let r;
+      try {
+        r = await api('POST', '/api/login/teacher', { password: d.password });
+      } catch (e) {
+        if (e.status === 409) { S.teacherSetup = true; viewLogin(); }
+        throw e;
+      }
       setSession(r.token);
+      history.replaceState(null, '', '#/t');
+      render();
+    },
+    teacherSetup: async (form, d) => {
+      if ((d.password || '').length < 8) throw new Error('비밀번호는 8자 이상으로 정해 주세요.');
+      if (d.password !== d.password2) throw new Error('두 칸의 비밀번호가 서로 달라요.');
+      const r = await api('POST', '/api/setup/teacher', { password: d.password });
+      S.teacherSetup = false;
+      setSession(r.token);
+      toast('선생님 비밀번호를 만들었어요. 잊지 않게 꼭 기억해 두세요.', 'ok');
       history.replaceState(null, '', '#/t');
       render();
     },
