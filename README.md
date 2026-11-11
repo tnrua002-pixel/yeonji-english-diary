@@ -101,6 +101,9 @@ public/styles.css    다이어리 디자인
 public/sw.js         홈 화면 앱(PWA)용 서비스 워커
 public/manifest.webmanifest, public/icons/   앱 이름·아이콘
 start-windows.bat    내 PC에서 실행
+tests/               자동 점검 (node tests/smoke-test.js, node tests/reset-test.js — Node.js와 Python 필요)
+CLAUDE.md            Claude가 이어서 작업할 때 읽는 정리 노트
+이어서하기.md         다른 곳(학교 등)에서 이어서 할 때 보는 안내
 data/                (실행하면 생김) 데이터베이스와 업로드 파일 — 저장소에 올리지 않음
 ```
 
