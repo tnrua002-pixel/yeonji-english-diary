@@ -1098,6 +1098,7 @@
     S.adminUnits = o.units;
     S.pendingCount = o.pending.length;
     const n = o.units.length;
+    const needSort = n > 1 && sortedUnitIds(o.units).join() !== o.units.map((u) => u.id).join();
     const body = `
       <h1>단원 관리</h1>
       <p class="hint">단원을 만들고 순서를 바꾸거나, 단어·본문·문법을 편집할 수 있어요. ‘작성 중’ 단원은 학생에게 보이지 않아요.</p>
@@ -1106,6 +1107,7 @@
         <button class="btn primary" type="submit">${ICON.plus}<span>새 단원 만들기</span></button>
       </form>
       ${importCard()}
+      ${needSort ? `<div class="sort-row"><button class="btn sm" data-act="sortUnits">${ICON.up}<span>Lesson 번호 순서로 정렬</span></button><small class="hint">Lesson 1, 2, 3 … 순서로 맞추고, 번호가 없는 단원은 맨 뒤로 보내요.</small></div>` : ''}
       ${n ? `<ol class="unit-admin">${o.units.map((u, i) => `
         <li class="card ua">
           <div class="ua-order">
@@ -1126,6 +1128,17 @@
           </div>
         </li>`).join('')}</ol>` : empty('아직 단원이 없어요. 위에서 새 단원을 만들어 보세요.')}`;
     paint(seq, tShell('units', body));
+  }
+
+  // 단원 이름의 Lesson 번호 순서 (번호가 없는 단원은 맨 뒤, 그 안에서는 지금 순서 그대로)
+  function lessonNo(title) {
+    const m = String(title || '').match(/^\s*(?:lesson|unit)\s*(\d+)/i);
+    return m ? Number(m[1]) : null;
+  }
+  function sortedUnitIds(units) {
+    return units.map((u, i) => ({ id: u.id, i, n: lessonNo(u.title) }))
+      .sort((a, b) => ((a.n === null) - (b.n === null)) || (a.n !== null && b.n !== null ? a.n - b.n : 0) || (a.i - b.i))
+      .map((x) => x.id);
   }
 
   // 단원 파일(.json) 가져오기: 파일을 고르면 먼저 화면에 내용을 보여 주고, ‘가져오기’를 눌러야 서버에 보내요.
@@ -1790,6 +1803,12 @@
       }
     },
     cancelImport: () => { S.importDraft = null; render(); },
+    sortUnits: async () => {
+      await api('PUT', '/api/admin/units-order', { ids: sortedUnitIds(S.adminUnits || []) });
+      invalidate();
+      toast('단원을 Lesson 번호 순서로 정렬했어요.', 'ok');
+      render();
+    },
     delUnit: async (el) => {
       if (!confirm(`‘${el.dataset.title}’ 단원을 삭제할까요?\n\n이 단원의 학습지 파일과 학생 질문도 함께 지워지고, 되돌릴 수 없어요.`)) return;
       await api('DELETE', `/api/admin/units/${encodeURIComponent(el.dataset.id)}`);
