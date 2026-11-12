@@ -90,6 +90,7 @@
     route: [], lastHash: '', renderedHash: null,
     loginMode: 'student', installEvt: null, teacherSetup: null,
     hwDraft: null, hwFilter: 'waiting', editingAssignment: null, assignmentsCache: [], hwWaiting: 0, hwNew: 0,
+    importDraft: null, importing: false,
   };
 
   // ---------- 서버 통신 ----------
@@ -114,7 +115,7 @@
   function setSession(token) { S.token = token; ls.set('yd_token', token); S.me = null; invalidate(); }
   function clearSession() {
     S.token = null; ls.set('yd_token', null); S.me = null; invalidate();
-    S.edit = null; S.dirty = false; S.words = null; S.quiz = {}; S.pass = { unitId: null, open: new Set() };
+    S.edit = null; S.dirty = false; S.words = null; S.quiz = {}; S.pass = { unitId: null, open: new Set() }; S.importDraft = null;
   }
   function invalidate() { S.boot = null; S.units = {}; }
   async function loadBoot(force) {
@@ -1083,13 +1084,7 @@
         <label class="field"><span>새 단원 이름</span><input type="text" name="title" required maxlength="120" placeholder="예) Lesson 2. My Dream Job"></label>
         <button class="btn primary" type="submit">${ICON.plus}<span>새 단원 만들기</span></button>
       </form>
-      <div class="card import-units">
-        <div class="import-text">
-          <h2>단원 파일 가져오기</h2>
-          <p class="hint">단원 파일(.json)을 고르면 단어·본문·문법·학습지가 한 번에 들어가요. 가져온 단원은 ‘작성 중’이라 학생에게는 아직 안 보여요.</p>
-        </div>
-        <label class="btn file-btn">${ICON.upload}<span>단원 파일 고르기</span><input type="file" class="sr-only" accept=".json,application/json" data-import-units></label>
-      </div>
+      ${importCard()}
       ${n ? `<ol class="unit-admin">${o.units.map((u, i) => `
         <li class="card ua">
           <div class="ua-order">
@@ -1112,26 +1107,55 @@
     paint(seq, tShell('units', body));
   }
 
-  // 단원 파일(.json) 가져오기: 내용을 먼저 보여 주고, 확인하면 서버에 보내요
-  async function importUnits(f) {
+  // 단원 파일(.json) 가져오기: 파일을 고르면 먼저 화면에 내용을 보여 주고, ‘가져오기’를 눌러야 서버에 보내요.
+  // 확인 창(confirm)은 쓰지 않아요. 확인 창이 막힌 브라우저(앱 안의 브라우저 등)에서도 가져올 수 있게요.
+  function importCard() {
+    const D = S.importDraft;
+    const pick = `<label class="btn file-btn">${ICON.upload}<span>${D ? '다른 파일 고르기' : '단원 파일 고르기'}</span><input type="file" class="sr-only" accept=".json,application/json" data-import-units></label>`;
+    if (!D) {
+      return `
+      <div class="card import-units">
+        <div class="import-text">
+          <h2>단원 파일 가져오기</h2>
+          <p class="hint">단원 파일(.json)을 고르면 단어·본문·문법·학습지가 한 번에 들어가요. 가져온 단원은 ‘작성 중’이라 학생에게는 아직 안 보여요.</p>
+        </div>
+        ${pick}
+      </div>`;
+    }
+    return `
+      <div class="card import-units import-ready">
+        <div class="import-text">
+          <h2>단원 파일 가져오기</h2>
+          <p><b>${esc(D.name)}</b> 파일에서 단원 ${D.units.length}개를 찾았어요. 내용이 맞으면 ‘가져오기’를 눌러 주세요.</p>
+          <ul class="import-list">${D.units.map((u) => `
+            <li><b class="en">${esc(u.title)}</b><small>단어 ${u.words} · 문장 ${u.sentences} · 문법 ${u.grammar} · 학습지 ${u.sheets}</small></li>`).join('')}</ul>
+          ${D.dupes.length ? `<div class="alert">같은 이름의 단원이 이미 있어요: ${esc(D.dupes.join(', '))}. 그래도 가져오면 같은 단원이 하나 더 생겨요.</div>` : ''}
+          <p class="hint">가져온 단원은 ‘작성 중’으로 들어가서 학생에게는 아직 안 보여요.</p>
+          <div class="btn-row">
+            <button class="btn primary" data-act="importUnits">${ICON.upload}<span>단원 ${D.units.length}개 가져오기</span></button>
+            <button class="btn ghost" data-act="cancelImport">취소</button>
+            ${pick}
+          </div>
+        </div>
+      </div>`;
+  }
+  async function prepareImport(f) {
     if (f.size > 40 * 1024 * 1024) throw new Error('40MB 이하 단원 파일만 가져올 수 있어요.');
     let data = null;
     try { data = JSON.parse(await f.text()); } catch (e) { /* 아래에서 안내 */ }
     const units = data && data.format === 'yeonji-diary-units' && Array.isArray(data.units) ? data.units.filter((u) => u && typeof u === 'object') : [];
     if (!units.length) throw new Error('연지쌤 영어 다이어리 단원 파일이 아니에요. 파일을 다시 확인해 주세요.');
     const count = (a) => (Array.isArray(a) ? a.length : 0);
-    const lines = units.map((u) => {
-      const sents = (Array.isArray(u.paragraphs) ? u.paragraphs : []).reduce((n, p) => n + count(p && p.sentences), 0);
-      return `• ${u.title || '제목 없는 단원'}\n   단어 ${count(u.words)} · 문장 ${sents} · 문법 ${count(u.grammar)} · 학습지 ${count(u.worksheets)}`;
-    });
     const have = new Set((S.adminUnits || []).map((u) => u.title));
-    const dupes = units.filter((u) => have.has(u.title)).map((u) => u.title);
-    const warn = dupes.length ? `\n\n⚠ 같은 이름의 단원이 이미 있어요: ${dupes.join(', ')}\n그래도 가져오면 같은 단원이 하나 더 생겨요.` : '';
-    if (!confirm(`이 파일의 단원 ${units.length}개를 가져올까요?\n\n${lines.join('\n')}${warn}\n\n가져온 단원은 ‘작성 중’으로 들어가요. 내용을 확인한 뒤 공개해 주세요.`)) return;
-    toast('단원을 가져오는 중이에요…');
-    const r = await api('POST', '/api/admin/units/import', f);
-    invalidate();
-    toast(`단원 ${r.units.length}개를 가져왔어요. 확인한 뒤 ‘저장하고 학생에게 공개’를 눌러 주세요.`, 'ok');
+    S.importDraft = {
+      file: f,
+      name: f.name,
+      units: units.map((u) => ({
+        title: u.title || '제목 없는 단원', words: count(u.words), grammar: count(u.grammar), sheets: count(u.worksheets),
+        sentences: (Array.isArray(u.paragraphs) ? u.paragraphs : []).reduce((n, p) => n + count(p && p.sentences), 0),
+      })),
+      dupes: units.filter((u) => have.has(u.title)).map((u) => u.title),
+    };
     render();
   }
 
@@ -1682,6 +1706,22 @@
       invalidate();
       render();
     },
+    importUnits: async () => {
+      const D = S.importDraft;
+      if (!D || S.importing) return;
+      S.importing = true;
+      try {
+        toast('단원을 가져오는 중이에요…');
+        const r = await api('POST', '/api/admin/units/import', D.file);
+        S.importDraft = null;
+        invalidate();
+        toast(`단원 ${r.units.length}개를 가져왔어요. 확인한 뒤 ‘저장하고 학생에게 공개’를 눌러 주세요.`, 'ok');
+        render();
+      } finally {
+        S.importing = false;
+      }
+    },
+    cancelImport: () => { S.importDraft = null; render(); },
     delUnit: async (el) => {
       if (!confirm(`‘${el.dataset.title}’ 단원을 삭제할까요?\n\n이 단원의 학습지 파일과 학생 질문도 함께 지워지고, 되돌릴 수 없어요.`)) return;
       await api('DELETE', `/api/admin/units/${encodeURIComponent(el.dataset.id)}`);
@@ -2091,7 +2131,7 @@
       const f = t.files && t.files[0];
       t.value = '';
       if (!f) return;
-      try { await importUnits(f); } catch (e) { toast(e.message, 'err'); }
+      try { await prepareImport(f); } catch (e) { toast(e.message, 'err'); }
     } else if (t.dataset && t.dataset.hwPhotos !== undefined) {
       const files = [...(t.files || [])];
       t.value = '';
