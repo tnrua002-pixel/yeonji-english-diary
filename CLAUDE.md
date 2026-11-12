@@ -1,6 +1,7 @@
 # 연지쌤 영어 다이어리 — Claude 작업 노트
 
 다른 PC나 새 세션에서 이어서 작업할 수 있도록 정리한 노트예요. 작업을 시작하기 전에 끝까지 읽어 주세요.
+사용자가 읽는 쉬운 안내는 `이어서하기.md`예요. 큰 일을 마치면 두 파일을 함께 고쳐 주세요.
 
 ## 사용자와 일하는 방식
 - 조종중학교 이연지 선생님의 영어 수업 웹앱이에요. 사용자는 개발을 잘 모르니 **모든 설명은 쉬운 한국어로, 한 번에 한 단계씩** 해 주세요.
@@ -8,7 +9,9 @@
 - **돈이 들지 않는 방법**을 원해요. 요청하지 않은 점수 경쟁·랭킹·결제 기능은 넣지 않아요.
 - 디자인: 파스텔 핑크 종이 + 차분한 초록 포인트, 다이어리 인덱스 탭. 겨자색·베이지는 쓰지 않아요. 학생 화면은 2000년대 미니 홈페이지 느낌(사용자 요청, 2026-11-12)이에요. 싸이월드 이름·로고·캐릭터는 쓰지 않고 그 시절 느낌만 살려요.
 
-## 지금 상태 (2026-11-12 기준)
+## 지금 상태 (2026-11-13 기준)
+- 운영 서버에 올라간 버전: `65080db` (친구 방·방명록·물어보세요까지, 2026-11-13 0시쯤). 저장소의 main과 같아요.
+- 운영 자료: Lesson 1~7 공개, ‘지금 배우는 단원’ Lesson 7. 학생은 아직 0명(접속 전), 승인된 추가 선생님 계정 1개. 친구 방 기능은 켜져 있고 범위는 같은 학년.
 - 운영 주소: https://yeonjidiary.pythonanywhere.com (PythonAnywhere 무료 Beginner 계정, 사용자 이름 `yeonjidiary`)
 - GitHub: https://github.com/tnrua002-pixel/yeonji-english-diary (공개 저장소, 사용자가 승인)
 - 선생님 비밀번호는 사용자가 첫 접속 때 직접 만들었어요. 기본 비밀번호는 없어요.
@@ -47,20 +50,39 @@
 - Python 위치를 못 찾으면 환경 변수 `PYTHON`에 python.exe 경로를 넣고 실행하세요.
 
 ## 운영 서버에 새 버전 올리기
+0. **운영 서버에 올리기 전에 꼭 사용자에게 "올릴까요?"라고 묻고 허락을 받아요.** (2026-11-12에 허락 없이 콘솔에 명령을 넣으려다 안전 확인에 막혔고, 사용자가 허락한 뒤에는 잘 됐어요.)
 1. 고치고 테스트 → `git commit` → `git push`
-2. PythonAnywhere(브라우저, 사용자 로그인이 필요해요) → **Consoles → Bash**:
-   `cp ~/diary-data/db.json ~/diary-data/db.backup-$(date +%Y%m%d).json && cd ~/yeonji-english-diary && git pull`
-3. **Web** 탭 → **Reload** → https://yeonjidiary.pythonanywhere.com/api/health 가 `{"ok": true}`인지 확인
+2. PythonAnywhere(브라우저, 사용자 로그인이 필요해요) → **Consoles → Bash** (`Bash console 49126351`이 열려 있었어요):
+   `clear && cd ~/yeonji-english-diary && cp ~/diary-data/db.json ~/diary-data/db.backup-$(date +%Y%m%d-%H%M).json && git pull && git log --oneline -1`
+   - 서버 시계는 영국 시간(UTC)이라 백업 파일 날짜가 한국보다 9시간 느려요.
+3. **Web** 탭 → **Reload yeonjidiary.pythonanywhere.com** 버튼 → https://yeonjidiary.pythonanywhere.com/api/health 가 `{"ok": true}`인지 확인
+4. 사용자가 열어 둔 앱에는 ‘새 버전이 나왔어요’ 띠가 떠요. ‘새로고침’을 눌러 달라고 알려 주세요.
+- 운영 사이트를 확인할 때 **설정 화면은 캡처하지 마세요** (참여 코드와 QR이 보여요). 필요하면 자바스크립트로 ‘있다·없다’만 확인해요.
 - WSGI 파일: `/var/www/yeonjidiary_pythonanywhere_com_wsgi.py` (`DATA_DIR=/home/yeonjidiary/diary-data`), Force HTTPS 켜져 있어요.
 - 자료 형식이 바뀌면 `load_db()`에서 예전 자료를 자동으로 바꿔 주도록 만들어요. 운영 자료를 지우지 마세요.
 - 무료 웹 앱은 **한 달마다** Web 탭의 "Run until 1 month from today"로 연장해야 해요. (2026-11-12 확인: 12월 11일까지 켜져 있음)
 - Claude 앱 안의 브라우저 창은 확인 창(confirm·alert)을 막고 자동으로 ‘취소’해요. 그래서 그 창에서는 앱의 ‘삭제’처럼 확인 창을 쓰는 버튼이 안 돼요. 그런 일은 사용자의 크롬이나 휴대폰에서 하거나, 화면 안 버튼으로 만들어요. 파일 고르기 창도 Claude가 고를 수 없어요. 파일 경로를 클립보드에 복사해 두고, 사용자가 ‘파일 이름’ 칸에 붙여넣게 해요.
 
+## 작업 요령 (Claude용, 이번에 겪은 것)
+- **화면 시험은 따로 띄운 시험용 서버에서** 해요. 연습 자료 `data/`나 운영 서버는 건드리지 않아요.
+  - scratchpad에 작은 실행 파일을 만들어 `DATA_DIR`(scratchpad 안 `testdata`), `PORT=3100`, `TEACHER_PASSWORD`(scratchpad 파일에서 읽기)를 정한 뒤 `runpy.run_path(app.py)`로 켜고, `.claude/launch.json`에 잠깐 설정을 추가해 `preview_start`로 열어요. 다 쓰면 설정·시험 자료·비밀번호 파일을 지워요.
+  - 시험용 학생·글은 Node 스크립트로 API를 불러 만들고, 받은 토큰을 브라우저 `localStorage.yd_token`에 넣어 그 사람으로 봐요.
+  - 시험 탭은 **뒤쪽 탭**(`tabs_create`)으로 열고, 사용자가 보던 탭을 다시 앞으로 해 둬요. (사용자가 시험 탭에 글을 쓴 적이 있어요.)
+  - 앱 안 브라우저의 뒤쪽 탭에서는 키보드 입력이 글 칸에 안 들어갈 때가 있어요. `form_input`으로 값을 넣어요.
+  - 휴대폰 크기 확인: `resize_window` 모바일(375px) → 옆으로 넘치는지(`scrollWidth > innerWidth`) 확인 → 끝나면 데스크톱으로 되돌리기.
+- **Windows에서 파일 만들 때**
+  - 한글이 들어간 `.ps1`은 BOM 있는 UTF-8로 저장해요. Windows PowerShell 5.1은 BOM이 없으면 CP949로 읽어서 한글이 깨져요.
+  - Bash heredoc으로 `\\`가 든 JSON을 쓰면 역슬래시가 하나로 줄어요. `.claude/launch.json` 같은 파일은 Write 도구로 써요.
+  - Python으로 파일을 고칠 때 텍스트 모드로 쓰면 줄 끝이 CRLF로 바뀌어요. `newline='\n'`이나 바이너리로 써요. (`app.py`가 한 번 바뀌어서 되돌렸어요.)
+  - Windows 시계는 약 15ms 단위라 빠르게 만든 글들의 시각이 같을 수 있어요. 최신순 정렬은 ‘같은 시각이면 나중에 들어온 것이 위’가 되게 만들어 두었어요.
+- **엑셀 파일 확인**: 집 PC에는 Microsoft Excel이 있어요. 숨긴 엑셀을 COM(`Excel.Application`, Visible·DisplayAlerts 끄기)으로 열어 읽고 고쳐 저장해 볼 수 있어요. 끝난 뒤 창 없는 EXCEL.EXE가 남으면 그 프로세스만 꺼요.
+- 이름이 겹치는 CSS 클래스에 주의해요. (`.pick`이 단원 편집기에 이미 있어서 프로필 꾸미기는 `.pf-pick`으로 바꿨어요.)
+
 ## 집 PC에만 있는 것 (다른 PC에는 없어요)
 - 예약 작업 `pythonanywhere-monthly-renewal`: 매월 1일·15일 10시에 연장 버튼을 눌러요. 집 PC와 Claude 앱이 켜져 있을 때만 실행돼요.
-- 설치된 도구: Node.js, Python 3.12, Git, GitHub CLI(`gh`, git 자격 증명 연결됨)
+- 설치된 도구: Node.js, Python 3.12, Git, GitHub CLI(`gh`, git 자격 증명 연결됨), Microsoft Excel, 한컴오피스 2020
 - git `safe.directory` 설정 (이 SSD는 exFAT라서 git이 폴더 소유자를 확인하지 못해요)
-- Claude 메모리
+- Claude 메모리 (중요한 내용은 이 노트에도 옮겨 두었어요)
 
 ## 다른 PC(학교 등)에서 이어서 할 때
 - SSD 드라이브 문자가 E:가 아닐 수 있어요. 폴더 이름은 `★클로드 영어공부 앱★`이에요.
@@ -81,8 +103,9 @@
 - 교과서 내용을 학생에게 공개하기 전에 학생 참여 코드부터 바꿔야 해요 (기본 코드가 공개 README에 있어요).
 
 ## 남은 일
+- **다음에 먼저 물어볼 것**: 사용자가 휴대폰으로 친구 방·방명록·물어보세요를 써 보기로 했어요(2026-11-13). 어땠는지, 고칠 곳이 있는지 물어보세요. (PC 앱 안 브라우저와 휴대폰 크기 화면으로만 시험했어요.)
 - 실제 휴대폰에서 과제 사진 제출 확인 (홈 화면 추가는 2026-11-12에 안드로이드에서 확인함)
 - 아이폰으로 접속 QR 찍기·홈 화면 추가 확인 (안드로이드는 2026-11-12에 QR로 열기·설치 확인함), 선생님 크롬에서 학생 명단 엑셀 내려받기·올리기 해 보기
-- 실제 휴대폰에서 친구 방·방명록·물어보세요 써 보기 (PC 앱 안 브라우저와 휴대폰 크기 화면으로만 시험했어요)
-- 운영 앱에 Lesson 1~7을 모두 가져와 학생에게 공개했어요 (2026-11-12, 단원마다 학습지 8개, Lesson 번호 순서). ‘지금 배우는 단원’은 Lesson 7이에요. 샘플 단원은 목록에 없어요 (사용자가 직접 지운 것으로 보여요).
+- 시험용 학생을 만들었다면 관리 화면 → 학생에서 지우기 (그 학생의 방명록·질문도 함께 지워져요)
 - 예약 연장 작업 첫 실행(11월 15일) 결과 확인
+- 지난 기록: 운영 앱에 Lesson 1~7을 모두 가져와 학생에게 공개했어요 (2026-11-12, 단원마다 학습지 8개, Lesson 번호 순서). 샘플 단원은 목록에 없어요 (사용자가 직접 지운 것으로 보여요).
