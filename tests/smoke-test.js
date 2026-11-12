@@ -222,6 +222,45 @@ async function req(method, url, { token, body, raw, headers } = {}) {
     check('없는 단원 삭제 → 404', (await req('DELETE', '/api/admin/units/u_nothing', { token: T })).status === 404);
     const delU = await req('DELETE', `/api/admin/units/${nu.id}`, { token: T });
     check('단원 삭제', delU.status === 200 && (await req('GET', '/api/bootstrap', { token: T })).json.units.length === 1);
+
+    console.log('\n[단원 파일 가져오기]');
+    const pkg = {
+      format: 'yeonji-diary-units', version: 1,
+      units: [
+        {
+          id: 'u_fromfile', title: 'Lesson 9. Import Test', subtitle: '가져오기 시험', status: 'published',
+          words: [{ id: 'w_same', word: 'trip', meaning: '(명) 여행', example: 'We went on a trip.', exampleKo: '우리는 여행을 갔다.' }],
+          paragraphs: [{ id: 'p_same', sentences: [{ id: 's_same', en: 'Hello.', ko: '안녕.' }] }],
+          grammar: [{ id: 'g_same', title: '문법', concept: '개념', examples: [{ en: '**There is** a cat.', ko: '고양이가 있다.' }], quiz: [{ id: 'q_same', question: '고르세요.', options: ['is', 'are'], answer: 1, explanation: '해설' }] }],
+          worksheets: [{ title: '시험 학습지', description: '설명', fileName: '시험 학습지.hwp', data: Buffer.from('HWP test file').toString('base64') }],
+        },
+        { title: 'Lesson 10. Second', words: [], paragraphs: [], grammar: [] },
+      ],
+    };
+    check('학생이 단원 파일 가져오기 → 403', (await req('POST', '/api/admin/units/import', { token: B, body: pkg })).status === 403);
+    check('형식 표시가 없는 파일 → 400', (await req('POST', '/api/admin/units/import', { token: T, body: { units: pkg.units } })).status === 400);
+    const unitsBefore = (await req('GET', '/api/admin/overview', { token: T })).json.units.length;
+    const badPkg = JSON.parse(JSON.stringify(pkg));
+    badPkg.units[1].worksheets = [{ fileName: 'virus.exe', data: Buffer.from('MZ').toString('base64') }];
+    const bad1 = await req('POST', '/api/admin/units/import', { token: T, body: badPkg });
+    check('허용 안 된 학습지 형식이 섞이면 → 400, 아무것도 안 들어감', bad1.status === 400 && (await req('GET', '/api/admin/overview', { token: T })).json.units.length === unitsBefore, bad1.json);
+    badPkg.units[1].worksheets = [{ fileName: 'a.pdf', data: '%%%not base64%%%' }];
+    check('학습지 내용이 깨져 있으면 → 400', (await req('POST', '/api/admin/units/import', { token: T, body: badPkg })).status === 400);
+    const im = await req('POST', '/api/admin/units/import', { token: T, body: pkg });
+    check('단원 파일 가져오기 → 2개, 모두 작성 중', im.status === 200 && im.json.units.length === 2 && im.json.units.every((u) => u.status === 'draft'), im.json);
+    const iu = (await req('GET', `/api/units/${im.json.units[0].id}`, { token: T })).json.unit;
+    check('가져온 단원 내용(단어·문장·문법·정답 위치)', iu.title === 'Lesson 9. Import Test' && iu.words.length === 1 && iu.paragraphs[0].sentences[0].ko === '안녕.' && iu.grammar[0].quiz[0].answer === 1 && iu.grammar[0].examples.length === 1, iu);
+    check('파일 속 id는 쓰지 않고 새로 만듦', iu.id !== 'u_fromfile' && iu.words[0].id !== 'w_same' && iu.paragraphs[0].sentences[0].id !== 's_same' && iu.grammar[0].quiz[0].id !== 'q_same');
+    check('작성 중이라 학생은 단원도 학습지도 못 봄', (await req('GET', `/api/units/${iu.id}`, { token: B })).status === 404 && (await req('GET', `/api/units/${iu.id}/worksheets`, { token: B })).status === 404);
+    const iws = (await req('GET', `/api/units/${iu.id}/worksheets`, { token: T })).json.worksheets;
+    check('학습지도 함께 들어감 (단원을 공개하면 같이 보이도록 공개 상태)', iws.length === 1 && iws[0].status === 'published' && iws[0].ext === 'hwp' && iws[0].fileName === '시험 학습지.hwp', iws);
+    const idl = await req('GET', iws[0].url);
+    check('가져온 학습지 내려받기', idl.status === 200 && idl.buf.toString() === 'HWP test file');
+    const im2 = await req('POST', '/api/admin/units/import', { token: T, body: pkg });
+    const iu2 = (await req('GET', `/api/units/${im2.json.units[0].id}`, { token: T })).json.unit;
+    check('같은 파일을 또 가져와도 id가 겹치지 않음', im2.status === 200 && iu2.id !== iu.id && iu2.words[0].id !== iu.words[0].id && iu2.grammar[0].quiz[0].id !== iu.grammar[0].quiz[0].id);
+    for (const u of [...im.json.units, ...im2.json.units]) await req('DELETE', `/api/admin/units/${u.id}`, { token: T });
+    check('가져온 단원을 지우면 학습지도 함께 지워짐', (await req('GET', '/api/admin/overview', { token: T })).json.units.length === unitsBefore && (await req('GET', iws[0].url)).status === 403);
     check('비밀번호 변경(짧으면 거절)', (await req('PUT', '/api/admin/password', { token: T, body: { current: TPW, next: 'short' } })).status === 400);
     check('비밀번호 변경(현재 비밀번호 틀리면 거절)', (await req('PUT', '/api/admin/password', { token: T, body: { current: 'wrong-pass', next: 'new-pass-123' } })).status === 403);
 

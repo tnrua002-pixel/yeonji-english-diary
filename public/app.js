@@ -442,20 +442,26 @@
     } else return nav(`#/u/${enc}`);
 
     const teacher = S.me.role === 'teacher';
+    const lesson = splitLesson(unit.title);
     const head = `
       <div class="unit-head">
         <div class="unit-head-top">
           <a class="back" href="${tab ? `#/u/${enc}` : (teacher ? '#/s' : '#/')}">← ${tab ? '단원 메뉴' : '홈'}</a>
           ${teacher ? `<a class="btn sm" href="#/t/unit/${enc}/${tab === 'words' || tab === 'passage' || tab === 'grammar' ? tab : 'info'}">이 단원 편집</a>` : ''}
         </div>
-        <p class="unit-kicker"><span>Unit ${idx + 1}</span>
+        <p class="unit-kicker"><span>${esc(lesson ? lesson.no : `Unit ${idx + 1}`)}</span>
           ${boot.currentUnitId === id ? '<span class="badge now">지금 배우는 단원</span>' : ''}
           ${unit.status !== 'published' ? '<span class="badge draft">작성 중 · 학생에게 안 보여요</span>' : ''}</p>
-        <h1 class="en-title">${esc(unit.title)}</h1>
+        <h1 class="en-title">${esc(lesson ? lesson.title : unit.title)}</h1>
         ${unit.subtitle ? `<p class="sub">${esc(unit.subtitle)}</p>` : ''}
       </div>
       ${tab ? secTabs(enc, tab) : ''}`;
     if (paint(seq, shell({ tabs: studentTabs(id), body: `${head}<div class="sec-body">${content}</div>` })) && afterPaint) afterPaint();
+  }
+  // "Lesson 5. Walk into Korea" → 작은 글씨 "Lesson 5" + 큰 제목 "Walk into Korea"
+  function splitLesson(title) {
+    const m = String(title || '').match(/^\s*(lesson|unit)\s*(\d+)\s*[.:)\-–]?\s+(\S.*)$/i);
+    return m ? { no: `${m[1][0].toUpperCase()}${m[1].slice(1).toLowerCase()} ${m[2]}`, title: m[3] } : null;
   }
   function secTabs(enc, tab) {
     return `<nav class="sec-tabs" aria-label="공부 메뉴">${SECTIONS.map((s) => `
@@ -651,7 +657,7 @@
         </div>
         <a class="btn primary" href="${esc(w.url)}" download="${esc(w.fileName)}">${ICON.download}<span>내려받기</span></a>
       </div>`).join('')}</div>
-      <p class="hint">스마트폰에서는 내려받은 파일이 ‘파일’ 또는 ‘다운로드’ 앱에 저장돼요.</p>`;
+      <p class="hint">스마트폰에서는 내려받은 파일이 ‘파일’ 또는 ‘다운로드’ 앱에 저장돼요.${list.some((w) => w.ext === 'hwp' || w.ext === 'hwpx') ? ' 한글(HWP) 파일은 무료 앱 ‘한컴오피스 Viewer’로 열 수 있어요.' : ''}</p>`;
   }
 
   // 질문
@@ -1077,6 +1083,13 @@
         <label class="field"><span>새 단원 이름</span><input type="text" name="title" required maxlength="120" placeholder="예) Lesson 2. My Dream Job"></label>
         <button class="btn primary" type="submit">${ICON.plus}<span>새 단원 만들기</span></button>
       </form>
+      <div class="card import-units">
+        <div class="import-text">
+          <h2>단원 파일 가져오기</h2>
+          <p class="hint">단원 파일(.json)을 고르면 단어·본문·문법·학습지가 한 번에 들어가요. 가져온 단원은 ‘작성 중’이라 학생에게는 아직 안 보여요.</p>
+        </div>
+        <label class="btn file-btn">${ICON.upload}<span>단원 파일 고르기</span><input type="file" class="sr-only" accept=".json,application/json" data-import-units></label>
+      </div>
       ${n ? `<ol class="unit-admin">${o.units.map((u, i) => `
         <li class="card ua">
           <div class="ua-order">
@@ -1097,6 +1110,29 @@
           </div>
         </li>`).join('')}</ol>` : empty('아직 단원이 없어요. 위에서 새 단원을 만들어 보세요.')}`;
     paint(seq, tShell('units', body));
+  }
+
+  // 단원 파일(.json) 가져오기: 내용을 먼저 보여 주고, 확인하면 서버에 보내요
+  async function importUnits(f) {
+    if (f.size > 40 * 1024 * 1024) throw new Error('40MB 이하 단원 파일만 가져올 수 있어요.');
+    let data = null;
+    try { data = JSON.parse(await f.text()); } catch (e) { /* 아래에서 안내 */ }
+    const units = data && data.format === 'yeonji-diary-units' && Array.isArray(data.units) ? data.units.filter((u) => u && typeof u === 'object') : [];
+    if (!units.length) throw new Error('연지쌤 영어 다이어리 단원 파일이 아니에요. 파일을 다시 확인해 주세요.');
+    const count = (a) => (Array.isArray(a) ? a.length : 0);
+    const lines = units.map((u) => {
+      const sents = (Array.isArray(u.paragraphs) ? u.paragraphs : []).reduce((n, p) => n + count(p && p.sentences), 0);
+      return `• ${u.title || '제목 없는 단원'}\n   단어 ${count(u.words)} · 문장 ${sents} · 문법 ${count(u.grammar)} · 학습지 ${count(u.worksheets)}`;
+    });
+    const have = new Set((S.adminUnits || []).map((u) => u.title));
+    const dupes = units.filter((u) => have.has(u.title)).map((u) => u.title);
+    const warn = dupes.length ? `\n\n⚠ 같은 이름의 단원이 이미 있어요: ${dupes.join(', ')}\n그래도 가져오면 같은 단원이 하나 더 생겨요.` : '';
+    if (!confirm(`이 파일의 단원 ${units.length}개를 가져올까요?\n\n${lines.join('\n')}${warn}\n\n가져온 단원은 ‘작성 중’으로 들어가요. 내용을 확인한 뒤 공개해 주세요.`)) return;
+    toast('단원을 가져오는 중이에요…');
+    const r = await api('POST', '/api/admin/units/import', f);
+    invalidate();
+    toast(`단원 ${r.units.length}개를 가져왔어요. 확인한 뒤 ‘저장하고 학생에게 공개’를 눌러 주세요.`, 'ok');
+    render();
   }
 
   // --- 단원 편집기 ---
@@ -2051,6 +2087,11 @@
         toast(`‘${f.name}’ 파일로 교체했어요.`, 'ok');
         render();
       } catch (e) { toast(e.message, 'err'); }
+    } else if (t.dataset && t.dataset.importUnits !== undefined) {
+      const f = t.files && t.files[0];
+      t.value = '';
+      if (!f) return;
+      try { await importUnits(f); } catch (e) { toast(e.message, 'err'); }
     } else if (t.dataset && t.dataset.hwPhotos !== undefined) {
       const files = [...(t.files || [])];
       t.value = '';

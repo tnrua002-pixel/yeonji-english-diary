@@ -474,6 +474,10 @@ input[type=file] { width: 100%; max-width: 100%; font-size: .95rem; padding: 10p
 /* 단원 관리 */
 .add-unit { display: flex; gap: 10px; align-items: flex-end; flex-wrap: wrap; }
 .add-unit .field { flex: 1 1 260px; margin: 0; }
+.import-units { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.import-units .import-text { flex: 1 1 260px; min-width: 0; }
+.import-units h2 { font-size: 1.05rem; margin: 0 0 4px; }
+.import-units .hint { margin: 0; }
 .unit-admin { list-style: none; padding: 0; margin: 0; }
 .ua { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .ua-order { display: flex; flex-direction: column; align-items: center; gap: 2px; }

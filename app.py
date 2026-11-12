@@ -790,6 +790,73 @@ def admin_current_unit(req):
     return ok({'currentUnitId': unit_id})
 
 
+# --- 단원 파일 가져오기: 단어·본문·문법·학습지를 파일 하나로 한꺼번에 넣어요 ---
+UNIT_FILE_FORMAT = 'yeonji-diary-units'
+MAX_IMPORT = 40 * 1024 * 1024
+
+
+def strip_ids(value):
+    """파일에 들어 있던 id는 버리고 새로 만들어요. (같은 파일을 두 번 가져와도 서로 겹치지 않게)"""
+    if isinstance(value, dict):
+        return {k: strip_ids(v) for k, v in value.items() if k != 'id'}
+    if isinstance(value, list):
+        return [strip_ids(v) for v in value]
+    return value
+
+
+def decode_sheet(s):
+    file_name = clean(get(s, 'fileName'), 200)
+    ext = clean_ext(file_name)
+    try:
+        buf = base64.b64decode(str(get(s, 'data') or ''), validate=True)
+    except ValueError:
+        raise HttpError(400, f'학습지 파일을 읽을 수 없어요: {file_name}')
+    if not buf:
+        raise HttpError(400, f'빈 학습지 파일이 있어요: {file_name}')
+    if len(buf) > MAX_UPLOAD:
+        raise HttpError(413, f'25MB보다 큰 학습지는 가져올 수 없어요: {file_name}')
+    return s, file_name, ext, buf
+
+
+@route('POST', '/api/admin/units/import')
+def admin_import_units(req):
+    require_teacher(req)
+    b = read_json(req, MAX_IMPORT)
+    if get(b, 'format') != UNIT_FILE_FORMAT:
+        raise HttpError(400, '연지쌤 영어 다이어리 단원 파일이 아니에요.')
+    items = [u for u in as_list(get(b, 'units'), 30) if isinstance(u, dict)]
+    if not items:
+        raise HttpError(400, '파일에 가져올 단원이 없어요.')
+    # 학습지 파일부터 모두 확인해요. 하나라도 잘못되면 아무것도 넣지 않아요.
+    prepared = [(u, [decode_sheet(s) for s in as_list(get(u, 'worksheets'), 30) if isinstance(s, dict)]) for u in items]
+    incoming = sum(len(sheet[3]) for _, sheets in prepared for sheet in sheets)
+    if incoming and storage_used() + incoming > STORAGE_QUOTA:
+        raise HttpError(413, '저장 공간이 부족해요. 오래된 과제 사진이나 학습지를 지운 뒤 다시 시도해 주세요.')
+    order = max([u.get('order', 0) for u in db['units']] or [0])
+    t = now_ms()
+    created = []
+    for data, sheets in prepared:
+        order += 1
+        fields = {k: strip_ids(get(data, k)) for k in ('title', 'subtitle', 'words', 'paragraphs', 'grammar')}
+        fields['status'] = 'draft'  # 가져온 단원은 선생님이 확인하고 공개해요
+        unit = normalize_unit(fields, {'id': new_id('u'), 'order': order})
+        db['units'].append(unit)
+        for s, file_name, ext, buf in sheets:
+            t += 1  # 파일에 적힌 순서대로 보이게 시간을 1씩 늘려요
+            db['worksheets'].append({
+                'id': new_id('ws'), 'unitId': unit['id'],
+                'title': clean(get(s, 'title'), 120) or os.path.splitext(file_name)[0],
+                'description': clean(get(s, 'description'), 500, True), 'fileName': file_name, 'ext': ext,
+                'stored': store_file(buf, ext), 'size': len(buf),
+                # 단원이 '작성 중'이면 학생에게 안 보이므로, 학습지는 단원을 공개할 때 함께 보이도록 공개로 둬요
+                'status': 'draft' if get(s, 'status') == 'draft' else 'published',
+                'createdAt': t, 'updatedAt': t,
+            })
+        created.append(unit)
+    save()
+    return ok({'units': [unit_summary(u) for u in created]})
+
+
 @route('GET', '/api/admin/worksheets')
 def admin_worksheets(req):
     require_teacher(req)
