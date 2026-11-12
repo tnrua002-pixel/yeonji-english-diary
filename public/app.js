@@ -91,6 +91,7 @@
     loginMode: 'student', installEvt: null, teacherSetup: null,
     hwDraft: null, hwFilter: 'waiting', editingAssignment: null, assignmentsCache: [], hwWaiting: 0, hwNew: 0,
     importDraft: null, importing: false, teacherReq: null, teacherRequests: 0, confirmTeacher: null,
+    rosterDraft: null, showPin: new Set(), qrSvg: '',
   };
 
   // ---------- 서버 통신 ----------
@@ -157,6 +158,18 @@
   async function render() {
     const seq = ++renderSeq;
     const r = parseHash();
+    if (r[0] === 'join') {
+      // QR 코드로 들어온 경우: 참여 코드를 미리 채워 두고, 주소에서는 코드를 지워요
+      if (r[1]) {
+        let last = {};
+        try { last = JSON.parse(ls.get('yd_last') || '{}') || {}; } catch (e) { last = {}; }
+        last.classCode = r[1];
+        ls.set('yd_last', JSON.stringify(last));
+        S.loginMode = 'student';
+      }
+      history.replaceState(null, '', '#/');
+      return render();
+    }
     S.route = r;
     S.lastHash = location.hash || '#/';
     closeZoom();
@@ -1564,16 +1577,64 @@
     paint(seq, tShell('notices', body));
   }
 
+  // 엑셀로 학생 명단 관리: 내려받아 고친 뒤 올리면 바뀌는 내용을 먼저 보여 주고, ‘반영하기’를 누르면 적용해요
+  function rosterCard() {
+    const D = S.rosterDraft;
+    let preview = '';
+    if (D) {
+      const s = D.preview.summary;
+      const parts = [];
+      if (s.new) parts.push(`새로 등록 ${s.new}명`);
+      if (s.rename) parts.push(`이름 고침 ${s.rename}명`);
+      if (s.pin) parts.push(`PIN 정함 ${s.pin}명`);
+      const issues = D.preview.issues;
+      const changes = D.preview.changes;
+      preview = `
+        <div class="roster-preview">
+          <h3>${esc(D.name)} 미리 보기</h3>
+          <p>${parts.length ? parts.join(' · ') : '바뀌는 내용이 없어요.'}${s.same ? ` · 그대로 ${s.same}명` : ''}${s.untouched ? ` · 파일에 없는 학생 ${s.untouched}명은 그대로 둬요` : ''}</p>
+          ${issues.length ? `<div class="alert"><b>확인이 필요한 줄이 ${issues.length}개 있어요.</b> 엑셀을 고친 뒤 다시 올려 주세요.
+            <ul>${issues.slice(0, 20).map((x) => `<li>${x.line}번째 줄 — ${esc(x.message)}</li>`).join('')}</ul></div>` : ''}
+          ${changes.length ? `<ul class="roster-changes">${changes.slice(0, 60).map((c) => `<li><b>${esc(c.label)}</b><small>${esc(c.what.join(' · '))}</small></li>`).join('')}</ul>
+            ${changes.length > 60 ? `<p class="hint">… 외 ${changes.length - 60}명</p>` : ''}` : ''}
+          <div class="btn-row">
+            ${!issues.length && parts.length ? '<button class="btn primary" data-act="applyRoster">반영하기</button>' : ''}
+            <button class="btn ghost" data-act="cancelRoster">${!issues.length && parts.length ? '취소' : '닫기'}</button>
+          </div>
+        </div>`;
+    }
+    return `
+      <section class="card roster-card">
+        <h2>엑셀로 학생 명단 관리</h2>
+        <p class="hint">학생 명단을 엑셀로 내려받아 고친 뒤 올리면 한 번에 반영돼요. <b>새 학생 미리 등록 · 이름 고치기 · PIN 정해 주기</b>를 할 수 있어요.
+          PIN을 잊은 학생은 PIN 칸에 새 숫자 4자리를 적어 올리면 돼요.</p>
+        <div class="btn-row">
+          <button class="btn" data-act="downloadRoster">${ICON.download}<span>엑셀 양식 내려받기</span></button>
+          <label class="btn file-btn">${ICON.upload}<span>고친 엑셀 올리기</span><input type="file" class="sr-only" accept=".xlsx,.csv" data-roster-file></label>
+        </div>
+        ${preview}
+      </section>`;
+  }
+  function pinInfo(s) {
+    if (s.pin) {
+      const shown = S.showPin.has(s.id);
+      return `PIN <b class="pin-num">${shown ? esc(s.pin) : '●●●●'}</b> <button type="button" class="link-btn" data-act="togglePin" data-id="${esc(s.id)}">${shown ? '숨기기' : '보기'}</button> (선생님이 정함)`;
+    }
+    if (s.hasPin) return 'PIN 학생이 정함';
+    return '<span class="warn-inline">첫 접속 때 학생이 PIN을 정해요</span>';
+  }
   async function tStudents(seq) {
     const { students } = await api('GET', '/api/admin/students');
     const body = `
       <h1>학생</h1>
       <p class="hint">학생은 <b>참여 코드 + 학년·반·번호·이름 + PIN 4자리</b>로 처음 접속할 때 자동으로 등록돼요. 개인 이메일은 필요 없어요.
-        PIN을 잊은 학생은 ‘PIN 초기화’를 누르면 다음 접속 때 새 PIN을 정할 수 있어요.</p>
+        PIN을 잊은 학생은 아래 엑셀로 새 PIN을 정해 주거나, ‘PIN 초기화’를 눌러 다음 접속 때 학생이 새 PIN을 정하게 할 수 있어요.
+        학생이 휴대폰으로 쉽게 들어오게 하려면 <a href="#/t/settings">설정</a>의 QR 코드를 보여 주세요.</p>
+      ${rosterCard()}
       ${students.length ? `<ul class="stu-list">${students.map((s) => `
         <li class="card stu">
           <div class="stu-info"><b>${s.grade}-${s.klass}-${s.number} ${esc(s.name)}</b>
-            <small>질문 ${s.questionCount}개 · 처음 접속 ${fmtDate(s.createdAt)}${!s.hasPin ? ' · <span class="warn-inline">새 PIN 설정 대기</span>' : ''}${s.locked ? ' · <span class="warn-inline">PIN 오류로 잠김</span>' : ''}</small></div>
+            <small>${pinInfo(s)} · 질문 ${s.questionCount}개 · ${s.loggedIn ? `처음 접속 ${fmtDate(s.createdAt)}` : '선생님이 미리 등록 · 아직 접속 전'}${s.locked ? ' · <span class="warn-inline">PIN 오류로 잠김</span>' : ''}</small></div>
           <div class="btn-row">
             <button class="btn sm" data-act="resetPin" data-id="${esc(s.id)}" data-label="${s.grade}-${s.klass}-${s.number} ${esc(s.name)}">PIN 초기화</button>
             <button class="btn sm ghost danger" data-act="delStudent" data-id="${esc(s.id)}" data-label="${s.grade}-${s.klass}-${s.number} ${esc(s.name)}">삭제</button>
@@ -1610,12 +1671,24 @@
     const [s, t] = await Promise.all([api('GET', '/api/admin/settings'), api('GET', '/api/admin/teachers')]);
     S.teacherRequests = t.owner ? t.teachers.filter((x) => x.status === 'pending').length : 0;
     const invite = `[연지쌤 영어 다이어리]\n주소: ${location.origin}\n참여 코드: ${s.classCode}\n처음 접속할 때 학년·반·번호·이름을 넣고, 나만 아는 PIN 4자리를 정하세요.`;
+    // QR 코드: 찍으면 앱이 열리고 참여 코드가 자동으로 들어가요 (# 뒤의 코드는 서버로 보내지지 않아요)
+    try { S.qrSvg = window.QR ? window.QR.svg(`${location.origin}/#/join/${encodeURIComponent(s.classCode)}`, '연지쌤 영어 다이어리 접속 QR 코드') : ''; } catch (e) { S.qrSvg = ''; }
+    const qrBox = S.qrSvg ? `
+          <div class="qr-box">
+            <div class="qr">${S.qrSvg}</div>
+            <div class="qr-text">
+              <b>휴대폰 카메라로 찍으면 바로 들어와요</b>
+              <p class="hint">앱이 열리고 참여 코드가 자동으로 들어가요. 처음 접속한 뒤 ‘홈 화면에 추가’하면 앱처럼 쓸 수 있어요. 참여 코드가 들어 있으니 우리 반 학생에게만 보여 주세요.</p>
+              <button type="button" class="btn sm primary" data-act="qrBig">${ICON.screen}<span>크게 보기 (수업 화면용)</span></button>
+            </div>
+          </div>` : '';
     const body = `
       <h1>설정</h1>
       ${s.defaultPassword ? '<div class="alert">기본 비밀번호(teacher1234)를 쓰고 있어요. 아래에서 꼭 바꿔 주세요.</div>' : ''}
       <div class="two-col">
         <section class="card">
           <h2>학생 접속 안내</h2>
+          ${qrBox}
           <p class="hint">아래 문구를 복사해 학급 알림장이나 칠판에 안내해 주세요.</p>
           <pre class="invite">${esc(invite)}</pre>
           <button type="button" class="btn primary sm" data-act="copyInvite" data-text="${esc(invite)}">안내 문구 복사</button>
@@ -1992,6 +2065,61 @@
     hwRemovePhoto: (el) => { if (S.hwDraft) { S.hwDraft.photos.splice(+el.dataset.i, 1); updatePreviews(); } },
     zoom: (el) => openZoom(el.dataset.src),
     closeZoom: () => closeZoom(),
+    qrBig: () => {
+      if (!S.qrSvg) return;
+      closeZoom();
+      const box = document.createElement('div');
+      box.className = 'zoom qr-zoom';
+      box.id = 'zoomBox';
+      box.setAttribute('role', 'dialog');
+      box.setAttribute('aria-label', 'QR 코드 크게 보기');
+      box.innerHTML = `<button type="button" class="btn zoom-close" data-act="closeZoom">닫기 ✕</button>
+        <div class="qr-big"><div class="qr">${S.qrSvg}</div><p>휴대폰 카메라로 찍으면<br><b>연지쌤 영어 다이어리</b>가 열려요</p></div>`;
+      document.body.appendChild(box);
+      box.querySelector('.zoom-close').focus();
+    },
+    // 학생 명단 엑셀
+    downloadRoster: async () => {
+      const res = await fetch('/api/admin/students/roster', { headers: { Authorization: `Bearer ${S.token}` } });
+      if (res.status === 401) { clearSession(); render(); throw new Error('다시 로그인해 주세요.'); }
+      if (!res.ok) {
+        let msg = '내려받지 못했어요. 다시 시도해 주세요.';
+        try { msg = (await res.json()).error || msg; } catch (e) { /* 그대로 */ }
+        throw new Error(msg);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const d = new Date();
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `학생 명단 ${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      toast('학생 명단 엑셀을 내려받았어요. PIN이 들어 있으니 학생에게 보여 주지 마세요.', 'ok');
+    },
+    applyRoster: async (el) => {
+      const D = S.rosterDraft;
+      if (!D || el.disabled) return;
+      el.disabled = true;
+      el.textContent = '반영하는 중…';
+      try {
+        const r = await api('POST', '/api/admin/students/roster?apply=1', D.file, { 'X-File-Name': encodeURIComponent(D.name) });
+        S.rosterDraft = null;
+        const s = r.summary;
+        toast(`반영했어요. 새로 등록 ${s.new}명 · 이름 고침 ${s.rename}명 · PIN 정함 ${s.pin}명`, 'ok');
+        render();
+      } catch (e) {
+        el.disabled = false;
+        el.textContent = '반영하기';
+        throw e;
+      }
+    },
+    cancelRoster: () => { S.rosterDraft = null; render(); },
+    togglePin: (el) => {
+      if (S.showPin.has(el.dataset.id)) S.showPin.delete(el.dataset.id); else S.showPin.add(el.dataset.id);
+      render();
+    },
     delMySubmission: async (el) => {
       if (!confirm('낸 과제를 지울까요? 올린 사진도 함께 지워져요.')) return;
       await api('DELETE', `/api/assignments/${encodeURIComponent(el.dataset.id)}/submission`);
@@ -2220,6 +2348,17 @@
         await api('PUT', `/api/admin/worksheets/${encodeURIComponent(t.dataset.replace)}/file`, f, { 'X-File-Name': encodeURIComponent(f.name) });
         invalidate();
         toast(`‘${f.name}’ 파일로 교체했어요.`, 'ok');
+        render();
+      } catch (e) { toast(e.message, 'err'); }
+    } else if (t.dataset && t.dataset.rosterFile !== undefined) {
+      const f = t.files && t.files[0];
+      t.value = '';
+      if (!f) return;
+      try {
+        if (f.size > 5 * 1024 * 1024) throw new Error('5MB 이하 파일만 올릴 수 있어요.');
+        toast('엑셀 내용을 확인하는 중이에요…');
+        const preview = await api('POST', '/api/admin/students/roster?apply=0', f, { 'X-File-Name': encodeURIComponent(f.name) });
+        S.rosterDraft = { file: f, name: f.name, preview };
         render();
       } catch (e) { toast(e.message, 'err'); }
     } else if (t.dataset && t.dataset.importUnits !== undefined) {

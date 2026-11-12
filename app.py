@@ -7,8 +7,10 @@
 데이터: DATA_DIR/db.json, 업로드 파일: DATA_DIR/uploads/
 """
 import base64
+import csv
 import hashlib
 import hmac
+import io
 import json
 import os
 import re
@@ -16,8 +18,11 @@ import secrets
 import threading
 import time
 import traceback
+import xml.etree.ElementTree as ET
+import zipfile
 from http import HTTPStatus
 from urllib.parse import parse_qs, quote, unquote
+from xml.sax.saxutils import escape as xml_escape
 
 from seed import create_seed
 
@@ -504,7 +509,7 @@ def health(req):
 
 
 # --- 화면 버전: 화면 파일이 바뀌면(새 버전을 올리면) 값이 달라져요. 열려 있는 앱이 '새로고침' 안내를 띄울 때 써요 ---
-VERSION_FILES = ('index.html', 'app.js', 'styles.css')
+VERSION_FILES = ('index.html', 'app.js', 'styles.css', 'qr.js')
 _version_cache = {}
 
 
@@ -573,7 +578,7 @@ def student_login(b):
     if not st:
         st = {
             'id': new_id('st'), 'key': key, 'grade': grade, 'klass': klass, 'number': number, 'name': name,
-            'pinHash': hash_secret(pin), 'fails': 0, 'lockUntil': 0, 'createdAt': now_ms(),
+            'pinHash': hash_secret(pin), 'fails': 0, 'lockUntil': 0, 'createdAt': now_ms(), 'lastLoginAt': now_ms(),
         }
         db['students'].append(st)
         return st, True
@@ -582,9 +587,11 @@ def student_login(b):
         raise HttpError(429, f'PIN을 여러 번 틀려서 잠겼어요. {minutes}분 뒤에 다시 하거나 선생님께 PIN 초기화를 부탁하세요.')
     if st['name'] != name:
         raise HttpError(403, '이 번호는 다른 이름으로 등록되어 있어요. 선생님께 확인해 주세요.')
-    if not st.get('pinHash'):  # 선생님이 PIN을 초기화한 경우: 지금 입력한 PIN이 새 PIN
+    if not st.get('pinHash'):  # 선생님이 PIN을 초기화했거나 미리 등록만 한 경우: 지금 입력한 PIN이 새 PIN
         st['pinHash'] = hash_secret(pin)
+        st['pinPlain'] = None  # 학생이 직접 정한 PIN은 선생님도 볼 수 없게 저장하지 않아요
         st['fails'] = 0
+        st['lastLoginAt'] = now_ms()
         return st, True
     if not verify_secret(pin, st['pinHash']):
         st['fails'] = st.get('fails', 0) + 1
@@ -594,6 +601,7 @@ def student_login(b):
         save()
         raise HttpError(403, 'PIN이 맞지 않아요. 잊어버렸다면 선생님께 PIN 초기화를 부탁하세요.')
     st['fails'] = 0
+    st['lastLoginAt'] = now_ms()
     return st, False
 
 
@@ -1089,6 +1097,9 @@ def admin_students(req):
         'id': s['id'], 'grade': s['grade'], 'klass': s['klass'], 'number': s['number'], 'name': s['name'],
         'createdAt': s['createdAt'], 'hasPin': bool(s.get('pinHash')), 'locked': s.get('lockUntil', 0) > now,
         'questionCount': sum(1 for q in db['questions'] if q['studentId'] == s['id']),
+        # 선생님이 엑셀로 정해 준 PIN만 보여 줘요 (학생이 직접 정한 PIN은 알 수 없어요)
+        'pin': s.get('pinPlain') or '',
+        'addedByTeacher': s.get('addedBy') == 'teacher', 'loggedIn': bool(s.get('lastLoginAt')) or s.get('addedBy') != 'teacher',
     } for s in items]})
 
 
@@ -1099,6 +1110,7 @@ def admin_reset_pin(req):
     if not s:
         raise HttpError(404, '학생을 찾을 수 없어요.')
     s['pinHash'] = None
+    s['pinPlain'] = None
     s['fails'] = 0
     s['lockUntil'] = 0
     for k, v in list(db['sessions'].items()):
@@ -1121,6 +1133,340 @@ def admin_delete_student(req):
             del db['sessions'][k]
     save()
     return ok({'ok': True})
+
+
+# --- 학생 명단 엑셀: 내려받아 고친 뒤 올리면 한꺼번에 반영해요 (새 학생 미리 등록 · 이름 고치기 · PIN 정해 주기) ---
+XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+NS_MAIN = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+NS_REL = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+NS_PKG = 'http://schemas.openxmlformats.org/package/2006/relationships'
+ROSTER_HEAD = ('학년', '반', '번호', '이름')
+MAX_ROSTER_ROWS = 500
+XLSX_STYLES = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    f'<styleSheet xmlns="{NS_MAIN}">'
+    '<fonts count="2"><font><sz val="11"/><name val="맑은 고딕"/></font><font><b/><sz val="11"/><name val="맑은 고딕"/></font></fonts>'
+    '<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>'
+    '<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>'
+    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>'
+    '<cellXfs count="3"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>'
+    '<xf numFmtId="0" fontId="1" fillId="0" borderId="0" xfId="0" applyFont="1"/>'
+    '<xf numFmtId="49" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs>'
+    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>'
+    '</styleSheet>'
+)
+
+
+def col_letter(i):
+    s = ''
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+def col_index(ref):
+    n = 0
+    for ch in ref:
+        if 'A' <= ch <= 'Z':
+            n = n * 26 + (ord(ch) - 64)
+        else:
+            break
+    return n - 1
+
+
+def xlsx_sheet(rows, widths, text_cols):
+    out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>', f'<worksheet xmlns="{NS_MAIN}">',
+           '<sheetViews><sheetView workbookViewId="0"><pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" state="frozen"/>'
+           '</sheetView></sheetViews><cols>']
+    for i, w in enumerate(widths):
+        style = ' style="2"' if i in text_cols else ''  # PIN 칸은 '텍스트' 서식이라 0으로 시작해도 그대로 남아요
+        out.append(f'<col min="{i + 1}" max="{i + 1}" width="{w}" customWidth="1"{style}/>')
+    out.append('</cols><sheetData>')
+    for r, row in enumerate(rows, start=1):
+        cells = []
+        for c, v in enumerate(row):
+            if v is None or v == '':
+                continue
+            ref = f'{col_letter(c)}{r}'
+            style = 1 if r == 1 else (2 if c in text_cols else 0)
+            if isinstance(v, int) and c not in text_cols:
+                cells.append(f'<c r="{ref}" s="{style}"><v>{v}</v></c>')
+            else:
+                cells.append(f'<c r="{ref}" s="{style}" t="inlineStr"><is><t xml:space="preserve">{xml_escape(str(v))}</t></is></c>')
+        out.append(f'<row r="{r}">' + ''.join(cells) + '</row>')
+    out.append('</sheetData></worksheet>')
+    return ''.join(out)
+
+
+def xlsx_bytes(sheets):
+    """sheets: [(시트 이름, 줄 목록, 칸 너비 목록, 텍스트로 둘 칸 번호 집합)] → .xlsx 파일 내용"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as z:
+        n = len(sheets)
+        overrides = ''.join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                            for i in range(1, n + 1))
+        z.writestr('[Content_Types].xml',
+                   '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+                   '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+                   '<Default Extension="xml" ContentType="application/xml"/>'
+                   '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+                   '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+                   + overrides + '</Types>')
+        z.writestr('_rels/.rels', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="{NS_PKG}">'
+                   f'<Relationship Id="rId1" Type="{NS_REL}/officeDocument" Target="xl/workbook.xml"/></Relationships>')
+        tags = ''.join(f'<sheet name="{xml_escape(s[0])}" sheetId="{i}" r:id="rId{i}"/>' for i, s in enumerate(sheets, start=1))
+        z.writestr('xl/workbook.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="{NS_MAIN}" xmlns:r="{NS_REL}"><sheets>{tags}</sheets></workbook>')
+        rels = ''.join(f'<Relationship Id="rId{i}" Type="{NS_REL}/worksheet" Target="worksheets/sheet{i}.xml"/>' for i in range(1, n + 1))
+        rels += f'<Relationship Id="rId{n + 1}" Type="{NS_REL}/styles" Target="styles.xml"/>'
+        z.writestr('xl/_rels/workbook.xml.rels', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="{NS_PKG}">{rels}</Relationships>')
+        z.writestr('xl/styles.xml', XLSX_STYLES)
+        for i, (_, rows, widths, text_cols) in enumerate(sheets, start=1):
+            z.writestr(f'xl/worksheets/sheet{i}.xml', xlsx_sheet(rows, widths, text_cols))
+    return buf.getvalue()
+
+
+def xml_part(z, name, limit=20 * 1024 * 1024):
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        return None
+    if info.file_size > limit:
+        raise HttpError(413, '엑셀 파일이 너무 커요.')
+    data = z.read(name)
+    if b'<!DOCTYPE' in data or b'<!ENTITY' in data:  # 엑셀 파일에는 이런 내용이 없어요. 위험할 수 있어 읽지 않아요
+        raise HttpError(400, '읽을 수 없는 엑셀 파일이에요.')
+    try:
+        return ET.fromstring(data)
+    except ET.ParseError:
+        raise HttpError(400, '엑셀 파일 내용이 깨져 있어요. 엑셀에서 다시 저장해 주세요.')
+
+
+def xlsx_rows(buf):
+    try:
+        z = zipfile.ZipFile(io.BytesIO(buf))
+    except zipfile.BadZipFile:
+        raise HttpError(400, '엑셀(.xlsx) 파일을 읽을 수 없어요. 엑셀에서 ‘Excel 통합 문서(.xlsx)’로 저장해 주세요.')
+    m = '{' + NS_MAIN + '}'
+    wb = xml_part(z, 'xl/workbook.xml')
+    rels = xml_part(z, 'xl/_rels/workbook.xml.rels')
+    if wb is None or rels is None:
+        raise HttpError(400, '엑셀(.xlsx) 파일이 아니에요.')
+    first = wb.find(f'{m}sheets/{m}sheet')
+    rid = first.get('{' + NS_REL + '}id') if first is not None else None
+    target = next((r.get('Target') for r in rels if r.get('Id') == rid), None) if rid else None
+    if not target:
+        raise HttpError(400, '엑셀 파일의 첫 번째 시트를 찾을 수 없어요.')
+    path = target.lstrip('/') if target.startswith('/') else 'xl/' + target
+    shared = []
+    sst = xml_part(z, 'xl/sharedStrings.xml')
+    if sst is not None:
+        shared = [''.join(t.text or '' for t in si.iter(f'{m}t')) for si in sst.findall(f'{m}si')]
+    sheet = xml_part(z, path)
+    if sheet is None:
+        raise HttpError(400, '엑셀 파일의 첫 번째 시트를 찾을 수 없어요.')
+    rows = []
+    for row in sheet.iter(f'{m}row'):
+        cells = {}
+        for c in row.findall(f'{m}c'):
+            col = col_index(c.get('r') or '')
+            if not 0 <= col <= 50:
+                continue
+            kind = c.get('t')
+            v = c.find(f'{m}v')
+            text = v.text if v is not None and v.text is not None else ''
+            if kind == 's':
+                try:
+                    text = shared[int(text)]
+                except (ValueError, IndexError):
+                    text = ''
+            elif kind == 'inlineStr':
+                text = ''.join(x.text or '' for x in c.iter(f'{m}t'))
+            cells[col] = text
+        line = int_in(row.get('r'), 1, 1048576) or len(rows) + 1
+        rows.append((line, [cells.get(i, '') for i in range(max(cells) + 1)] if cells else []))
+        if len(rows) > MAX_ROSTER_ROWS + 50:
+            raise HttpError(400, f'한 번에 {MAX_ROSTER_ROWS}명까지 올릴 수 있어요.')
+    return rows
+
+
+def csv_rows(buf):
+    for enc in ('utf-8-sig', 'cp949'):  # 한국어 엑셀이 저장한 CSV는 보통 cp949예요
+        try:
+            text = buf.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        raise HttpError(400, 'CSV 파일의 글자를 읽을 수 없어요. 엑셀(.xlsx)로 저장해서 올려 주세요.')
+    rows = [(i + 1, row) for i, row in enumerate(csv.reader(io.StringIO(text)))]
+    if len(rows) > MAX_ROSTER_ROWS + 50:
+        raise HttpError(400, f'한 번에 {MAX_ROSTER_ROWS}명까지 올릴 수 있어요.')
+    return rows
+
+
+def roster_data(file_name, buf):
+    ext = os.path.splitext(file_name or '')[1].lower()
+    if ext == '.xlsx':
+        rows = xlsx_rows(buf)
+    elif ext == '.csv':
+        rows = csv_rows(buf)
+    else:
+        raise HttpError(400, '엑셀(.xlsx) 파일을 올려 주세요.')
+
+    def norm(s):
+        return re.sub(r'\s', '', str(s or ''))
+
+    for idx, (_, cells) in enumerate(rows):
+        names = [norm(c) for c in cells]
+        if all(h in names for h in ROSTER_HEAD):  # 제목 줄: 칸 순서가 바뀌어도 제목으로 찾아요
+            cols = {h: names.index(h) for h in ROSTER_HEAD}
+            pin_col = next((i for i, x in enumerate(names) if 'PIN' in x.upper() and '상태' not in x), None)
+            break
+    else:
+        raise HttpError(400, '‘학년, 반, 번호, 이름’ 제목 줄이 있는 학생 명단 양식이 아니에요. 앱에서 양식을 내려받아 그대로 써 주세요.')
+    data = []
+    for line, cells in rows[idx + 1:]:
+        def cell(i):
+            return str(cells[i]).strip() if i is not None and i < len(cells) and cells[i] is not None else ''
+        vals = {h: cell(cols[h]) for h in ROSTER_HEAD}
+        pin = cell(pin_col)
+        if any(vals.values()) or pin:
+            data.append((line, vals, pin))
+    if len(data) > MAX_ROSTER_ROWS:
+        raise HttpError(400, f'한 번에 {MAX_ROSTER_ROWS}명까지 올릴 수 있어요.')
+    return data
+
+
+def roster_number(text, lo, hi):
+    m = re.fullmatch(r'(\d+)(?:\.0+)?\s*(?:학년|반|번)?', text.strip())
+    n = int(m.group(1)) if m else 0
+    return n if lo <= n <= hi else None
+
+
+def roster_plan(data):
+    by_key = {s['key']: s for s in db['students']}
+    ops, issues, seen = [], [], {}
+    for line, vals, pin_raw in data:
+        g = roster_number(vals['학년'], 1, 3)
+        k = roster_number(vals['반'], 1, 30)
+        n = roster_number(vals['번호'], 1, 60)
+        name = re.sub(r'\s', '', clean(vals['이름'], 20))
+        problems = [label for ok_, label in ((g, '학년(1~3)'), (k, '반(1~30)'), (n, '번호(1~60)'), (name, '이름')) if not ok_]
+        pin = ''
+        if pin_raw:
+            p = re.sub(r'\.0+$', '', pin_raw.strip())
+            if re.fullmatch(r'\d{1,4}', p):
+                pin = p.zfill(4)  # 엑셀이 0123을 123으로 바꿔도 0123으로 되돌려요
+            else:
+                problems.append('PIN(숫자 4자리)')
+        if problems:
+            issues.append({'line': line, 'message': '다음 칸을 확인해 주세요: ' + ', '.join(problems)})
+            continue
+        key = f'{g}-{k}-{n}'
+        if key in seen:
+            issues.append({'line': line, 'message': f'{g}학년 {k}반 {n}번이 {seen[key]}번째 줄에도 있어요.'})
+            continue
+        seen[key] = line
+        st = by_key.get(key)
+        op = {'line': line, 'key': key, 'grade': g, 'klass': k, 'number': n, 'name': name, 'pin': pin, 'student': st,
+              'rename': False, 'setPin': False}
+        if not st:
+            op['kind'] = 'new'
+            op['setPin'] = bool(pin)
+        else:
+            op['rename'] = st['name'] != name
+            op['setPin'] = bool(pin) and pin != (st.get('pinPlain') or '')
+            op['kind'] = 'update' if op['rename'] or op['setPin'] else 'same'
+        ops.append(op)
+    untouched = sum(1 for s in db['students'] if s['key'] not in seen)
+    return ops, issues, untouched
+
+
+@route('GET', '/api/admin/students/roster')
+def admin_roster_download(req):
+    require_teacher(req)
+    items = sorted(db['students'], key=lambda s: (s['grade'], s['klass'], s['number']))
+    rows = [['학년', '반', '번호', '이름', 'PIN', 'PIN 상태 (참고용 · 고치지 않아도 돼요)']]
+    for s in items:
+        if s.get('pinPlain'):
+            state = '선생님이 정함'
+        elif s.get('pinHash'):
+            state = '학생이 정함 (볼 수 없어요)'
+        else:
+            state = '첫 접속 때 학생이 정해요'
+        rows.append([s['grade'], s['klass'], s['number'], s['name'], s.get('pinPlain') or '', state])
+    guide = [[line] for line in (
+        '학생 명단 엑셀 사용법',
+        '',
+        '1. ‘학생 명단’ 시트에서 학년·반·번호·이름을 적거나 고쳐요. 새 학생은 아래 빈 줄에 이어서 적으면 미리 등록돼요.',
+        '2. PIN 칸에 숫자 4자리를 적으면 그 학생의 PIN이 그 숫자로 바뀌어요. 비워 두면 지금 PIN을 그대로 써요.',
+        '3. 저장한 뒤 앱의 [학생] 화면 → ‘고친 엑셀 올리기’로 올려요. 바뀌는 내용을 먼저 보여 주고, ‘반영하기’를 누르면 적용돼요.',
+        '',
+        '• 학생이 직접 정한 PIN은 안전을 위해 아무도 볼 수 없어요(‘학생이 정함’). 잊었다면 PIN 칸에 새 숫자를 적어 주세요.',
+        '• PIN을 새로 정해 주면 그 학생은 다른 기기에서 로그아웃되고, 새 PIN으로 다시 들어와야 해요.',
+        '• 미리 등록한 학생은 앱에 처음 들어올 때 학년·반·번호·이름을 이 파일과 똑같이 써야 해요.',
+        '• 이 파일에서 줄을 지워도 앱의 학생은 지워지지 않아요. 학생 삭제는 앱의 [학생] 화면에서 해요.',
+        '• PIN이 0으로 시작하면(예: 0123) 엑셀이 123으로 바꿀 수 있어요. 괜찮아요, 앱이 0123으로 알아서 고쳐요.',
+        '• PIN이 들어 있는 파일이니 학생들에게 보여 주지 말고 잘 보관해 주세요.',
+    )]
+    data = xlsx_bytes([('학생 명단', rows, [8, 8, 8, 14, 12, 36], {4}), ('사용법', guide, [110], set())])
+    return 200, [
+        ('Content-Type', XLSX_MIME), ('Content-Length', str(len(data))), ('Cache-Control', 'private, no-store'),
+        ('Content-Disposition', "attachment; filename=\"student-roster.xlsx\"; filename*=UTF-8''" + quote('학생 명단.xlsx', safe='')),
+    ], [data]
+
+
+@route('POST', '/api/admin/students/roster')
+def admin_roster_upload(req):
+    """?apply=0 이면 바뀌는 내용만 보여 주고, ?apply=1 이면 실제로 반영해요."""
+    require_teacher(req)
+    apply = req.q('apply') == '1'
+    buf = read_body(req, 5 * 1024 * 1024)
+    if not buf:
+        raise HttpError(400, '빈 파일이에요.')
+    ops, issues, untouched = roster_plan(roster_data(file_name_header(req), buf))
+    summary = {
+        'rows': len(ops), 'new': sum(1 for o in ops if o['kind'] == 'new'),
+        'rename': sum(1 for o in ops if o['rename']), 'pin': sum(1 for o in ops if o['setPin']),
+        'same': sum(1 for o in ops if o['kind'] == 'same'), 'untouched': untouched,
+    }
+    if not apply:
+        changes = []
+        for o in ops:
+            what = []
+            if o['kind'] == 'new':
+                what.append('새로 등록')
+            if o['rename']:
+                what.append(f"이름 {o['student']['name']} → {o['name']}")
+            if o['setPin']:
+                what.append(f"PIN {o['pin']}")
+            if what:
+                changes.append({'line': o['line'], 'label': f"{o['grade']}학년 {o['klass']}반 {o['number']}번 {o['name']}", 'what': what})
+        return ok({'summary': summary, 'changes': changes, 'issues': issues[:200]})
+    if issues:
+        raise HttpError(400, '확인이 필요한 줄이 있어요. 엑셀을 고친 뒤 다시 올려 주세요.')
+    now = now_ms()
+    for o in ops:
+        pin = o['pin']
+        if o['kind'] == 'new':
+            db['students'].append({
+                'id': new_id('st'), 'key': o['key'], 'grade': o['grade'], 'klass': o['klass'], 'number': o['number'],
+                'name': o['name'], 'pinHash': hash_secret(pin) if pin else None, 'pinPlain': pin or None,
+                'fails': 0, 'lockUntil': 0, 'createdAt': now, 'addedBy': 'teacher',
+            })
+        elif o['kind'] == 'update':
+            st = o['student']
+            if o['rename']:
+                st['name'] = o['name']
+            if o['setPin']:
+                st.update({'pinHash': hash_secret(pin), 'pinPlain': pin, 'fails': 0, 'lockUntil': 0})
+                for sk, sv in list(db['sessions'].items()):  # 새 PIN으로 다시 들어오도록 그 학생의 로그인을 해제해요
+                    if sv.get('studentId') == st['id']:
+                        del db['sessions'][sk]
+    save()
+    return ok({'summary': summary})
 
 
 @route('GET', '/api/admin/settings')

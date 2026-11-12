@@ -25,6 +25,58 @@ function check(name, cond, extra) {
   if (cond) { pass++; console.log(`  PASS  ${name}`); }
   else { fail++; console.log(`  FAIL  ${name}${extra !== undefined ? '  → ' + JSON.stringify(extra) : ''}`); }
 }
+// 엑셀이 저장하는 모양(글자는 sharedStrings, 숫자는 숫자)의 아주 작은 .xlsx를 만들어요 (외부 라이브러리 없이)
+function crc32(buf) {
+  let crc = 0xffffffff;
+  for (let n = 0; n < buf.length; n++) {
+    let c = (crc ^ buf[n]) & 0xff;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    crc = (crc >>> 8) ^ c;
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+function zipStore(files) {
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, content] of files) {
+    const nameBuf = Buffer.from(name, 'utf8');
+    const data = Buffer.from(content, 'utf8');
+    const crc = crc32(data);
+    const local = Buffer.alloc(30);
+    local.writeUInt32LE(0x04034b50, 0); local.writeUInt16LE(20, 4); local.writeUInt16LE(0x0800, 6);
+    local.writeUInt32LE(crc, 14); local.writeUInt32LE(data.length, 18); local.writeUInt32LE(data.length, 22); local.writeUInt16LE(nameBuf.length, 26);
+    parts.push(local, nameBuf, data);
+    const cen = Buffer.alloc(46);
+    cen.writeUInt32LE(0x02014b50, 0); cen.writeUInt16LE(20, 4); cen.writeUInt16LE(20, 6); cen.writeUInt16LE(0x0800, 8);
+    cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(data.length, 20); cen.writeUInt32LE(data.length, 24); cen.writeUInt16LE(nameBuf.length, 28); cen.writeUInt32LE(offset, 42);
+    central.push(cen, nameBuf);
+    offset += 30 + nameBuf.length + data.length;
+  }
+  const cenBuf = Buffer.concat(central);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(files.length, 8); end.writeUInt16LE(files.length, 10); end.writeUInt32LE(cenBuf.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat([...parts, cenBuf, end]);
+}
+function excelLike(rows) {
+  const NS = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main';
+  const strings = [];
+  const si = (s) => { let i = strings.indexOf(s); if (i < 0) { strings.push(s); i = strings.length - 1; } return i; };
+  const sheetRows = rows.map((row, r) => `<row r="${r + 1}">${row.map((v, c) => {
+    const ref = `${String.fromCharCode(65 + c)}${r + 1}`;
+    if (v === '' || v == null) return '';
+    return typeof v === 'number' ? `<c r="${ref}"><v>${v}</v></c>` : `<c r="${ref}" t="s"><v>${si(String(v))}</v></c>`;
+  }).join('')}</row>`).join('');
+  return zipStore([
+    ['[Content_Types].xml', '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/></Types>'],
+    ['_rels/.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>'],
+    ['xl/workbook.xml', `<?xml version="1.0"?><workbook xmlns="${NS}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="명단" sheetId="1" r:id="rId3"/></sheets></workbook>`],
+    ['xl/_rels/workbook.xml.rels', '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'],
+    ['xl/worksheets/sheet1.xml', `<?xml version="1.0"?><worksheet xmlns="${NS}"><sheetData>${sheetRows}</sheetData></worksheet>`],
+    ['xl/sharedStrings.xml', `<?xml version="1.0"?><sst xmlns="${NS}">${strings.map((s) => `<si><t>${s.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</t></si>`).join('')}</sst>`],
+  ]);
+}
+
 async function req(method, url, { token, body, raw, headers } = {}) {
   const h = Object.assign({}, headers || {});
   if (token) h.Authorization = `Bearer ${token}`;
@@ -212,6 +264,44 @@ async function req(method, url, { token, body, raw, headers } = {}) {
     check('초기화 후 기존 로그인 해제', (await req('GET', '/api/me', { token: A })).status === 401);
     const a3 = await req('POST', '/api/login/student', { body: { classCode: 'JOJONG', grade: 1, klass: 3, number: 5, name: '김민지', pin: '4321' } });
     check('초기화 후 새 PIN으로 접속', a3.status === 200 && a3.json.created === true);
+
+    console.log('\n[학생 명단 엑셀]');
+    const A3 = a3.json.token;
+    const xl = await req('GET', '/api/admin/students/roster', { token: T });
+    check('명단 엑셀 내려받기 (xlsx)', xl.status === 200 && /spreadsheetml/.test(xl.headers.get('content-type') || '') && xl.buf.slice(0, 2).toString() === 'PK', xl.status);
+    check('학생은 명단 내려받기 불가 → 403', (await req('GET', '/api/admin/students/roster', { token: B })).status === 403);
+    const upRoster = (buf, name, apply, token) => req('POST', `/api/admin/students/roster?apply=${apply ? 1 : 0}`, { token: token || T, raw: buf, headers: { 'X-File-Name': encodeURIComponent(name) } });
+    check('학생은 명단 올리기 불가 → 403', (await upRoster(xl.buf, '학생 명단.xlsx', false, B)).status === 403);
+    const sameRoster = (await upRoster(xl.buf, '학생 명단.xlsx', false)).json;
+    check('내려받은 엑셀을 그대로 올리면 바뀌는 것 없음', sameRoster.summary && sameRoster.summary.same === 2 && sameRoster.summary.new === 0 && sameRoster.issues.length === 0, sameRoster);
+    const head = ['학년', '반', '번호', '이름', 'PIN', 'PIN 상태'];
+    const badRows = [head, [1, 3, 5, '김민지', 123], [3, 5, 1, '새 학생', ''], [3, 5, 2, '박미리', '4321'], [4, 1, 1, '이상해', '12a']];
+    const pvBad = (await upRoster(excelLike(badRows), '고친 명단.xlsx', false)).json;
+    check('엑셀(공유 문자열 형식)의 문제 있는 줄을 미리 보기에서 알려 줌', pvBad.issues && pvBad.issues.length === 1 && pvBad.issues[0].line === 5, pvBad);
+    check('문제가 있으면 반영하지 않음 → 400', (await upRoster(excelLike(badRows), '고친 명단.xlsx', true)).status === 400);
+    const goodRows = badRows.slice(0, 4);
+    const pvGood = (await upRoster(excelLike(goodRows), '고친 명단.xlsx', false)).json;
+    check('미리 보기: 새로 2명 · PIN 2명 (엑셀이 0을 지운 123 → 0123)', pvGood.summary.new === 2 && pvGood.summary.pin === 2 && pvGood.issues.length === 0 && pvGood.changes.some((c) => c.what.includes('PIN 0123')), pvGood);
+    const applied = await upRoster(excelLike(goodRows), '고친 명단.xlsx', true);
+    check('명단 반영', applied.status === 200 && applied.json.summary.new === 2, applied.json);
+    check('PIN을 새로 정하면 그 학생의 기존 로그인 해제', (await req('GET', '/api/me', { token: A3 })).status === 401);
+    check('선생님이 정한 PIN(0123)으로 로그인', (await req('POST', '/api/login/student', { body: { classCode: 'JOJONG', grade: 1, klass: 3, number: 5, name: '김민지', pin: '0123' } })).status === 200);
+    check('미리 등록 + PIN을 정해 둔 학생 로그인', (await req('POST', '/api/login/student', { body: { classCode: 'JOJONG', grade: 3, klass: 5, number: 2, name: '박미리', pin: '4321' } })).status === 200);
+    check('미리 등록 학생도 틀린 PIN은 거절', (await req('POST', '/api/login/student', { body: { classCode: 'JOJONG', grade: 3, klass: 5, number: 2, name: '박미리', pin: '0000' } })).status === 403);
+    const firstLogin = await req('POST', '/api/login/student', { body: { classCode: 'JOJONG', grade: 3, klass: 5, number: 1, name: '새학생', pin: '2468' } });
+    check('PIN 없이 미리 등록한 학생은 첫 접속 때 PIN을 정함', firstLogin.status === 200 && firstLogin.json.created === true, firstLogin.json);
+    const studs3 = (await req('GET', '/api/admin/students', { token: T })).json.students;
+    const kimS = studs3.find((s) => s.name === '김민지');
+    const parkS = studs3.find((s) => s.name === '박미리');
+    const newS = studs3.find((s) => s.name === '새학생');
+    check('선생님이 정한 PIN은 선생님 화면에 보임', kimS.pin === '0123' && parkS.pin === '4321', { kim: kimS.pin, park: parkS.pin });
+    check('학생이 직접 정한 PIN은 보이지 않음', newS.pin === '' && newS.hasPin === true, newS);
+    await req('POST', `/api/admin/students/${kimS.id}/reset-pin`, { token: T });
+    check('PIN 초기화하면 보이던 PIN도 지워짐', (await req('GET', '/api/admin/students', { token: T })).json.students.find((s) => s.name === '김민지').pin === '');
+    const csvRoster = Buffer.from('﻿학년,반,번호,이름,PIN\n1,3,6,이준호B,\n', 'utf8');
+    const pvCsv = (await upRoster(csvRoster, '명단.csv', false)).json;
+    check('CSV 파일도 읽음 (이름 고침 1명)', pvCsv.summary && pvCsv.summary.rename === 1, pvCsv);
+    check('양식이 아닌 파일 → 400', (await upRoster(Buffer.from('hello'), 'x.xlsx', false)).status === 400);
 
     console.log('\n[기타 보안]');
     const tr = await req('GET', '/..%2fserver.js');
