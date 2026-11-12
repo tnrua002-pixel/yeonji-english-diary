@@ -68,7 +68,16 @@
     { key: 'sheets', label: '학습지', icon: 'sheet', desc: '선생님이 올린 파일 내려받기' },
     { key: 'ask', label: '선생님께 질문', icon: 'ask', desc: '모르는 내용을 바로 물어보기' },
   ];
-  const TNAV = [['', '대시보드'], ['units', '단원 관리'], ['sheets', '학습지'], ['hw', '과제'], ['questions', '질문함'], ['notices', '공지'], ['students', '학생'], ['settings', '설정']];
+  const TNAV = [['', '대시보드'], ['units', '단원 관리'], ['sheets', '학습지'], ['hw', '과제'], ['questions', '질문함'], ['community', '방명록·게시판'], ['notices', '공지'], ['students', '학생'], ['settings', '설정']];
+  // 친구 방: 캐릭터·배경색·오늘의 기분 (서버의 CHARACTERS·BG_COLORS·MOODS와 같은 이름)
+  const CHARS = [['rabbit', '🐰', '토끼'], ['bear', '🐻', '곰'], ['cat', '🐱', '고양이'], ['dog', '🐶', '강아지'], ['fox', '🦊', '여우'], ['panda', '🐼', '판다'], ['koala', '🐨', '코알라'], ['tiger', '🐯', '호랑이'],
+    ['frog', '🐸', '개구리'], ['penguin', '🐧', '펭귄'], ['hamster', '🐹', '햄스터'], ['chick', '🐥', '병아리'], ['pig', '🐷', '돼지'], ['unicorn', '🦄', '유니콘'], ['whale', '🐳', '고래'], ['octopus', '🐙', '문어']];
+  const CHAR = Object.fromEntries(CHARS.map(([k, e]) => [k, e]));
+  const BGS = [['pink', '분홍'], ['rose', '장미'], ['peach', '복숭아'], ['mint', '민트'], ['sky', '하늘'], ['lavender', '라벤더']];
+  const MOODS = [['happy', '😊', 'Happy', '행복해요'], ['excited', '😆', 'Excited', '신나요'], ['studying', '📚', 'Studying', '공부 중'], ['curious', '🤔', 'Curious', '궁금해요'], ['sleepy', '😴', 'Sleepy', '졸려요'],
+    ['hungry', '😋', 'Hungry', '배고파요'], ['lovely', '🥰', 'Lovely', '설레요'], ['cool', '😎', 'Cool', '멋져요'], ['tired', '😩', 'Tired', '피곤해요'], ['sad', '😢', 'Sad', '슬퍼요']];
+  const MOOD = Object.fromEntries(MOODS.map((m) => [m[0], m]));
+  const SCOPE_LABEL = { grade: '같은 학년끼리', class: '같은 반끼리', all: '학생 모두' };
   const GRADE_LABEL = { excellent: '아주 잘했어요', good: '잘했어요', retry: '다시 해 봐요' };
   const GRADE_CLASS = { excellent: 'g-excellent', good: 'g-good', retry: 'g-retry' };
   const MAX_PHOTOS = 4;
@@ -92,6 +101,7 @@
     hwDraft: null, hwFilter: 'waiting', editingAssignment: null, assignmentsCache: [], hwWaiting: 0, hwNew: 0,
     importDraft: null, importing: false, teacherReq: null, teacherRequests: 0, confirmTeacher: null,
     rosterDraft: null, showPin: new Set(), qrSvg: '',
+    replyOpen: null, postOpen: false, boardFilter: 'all', homes: [], boardWaiting: 0,
   };
 
   // ---------- 서버 통신 ----------
@@ -150,6 +160,7 @@
     if (seq !== renderSeq) return false;
     app.innerHTML = html;
     document.body.classList.remove('loading');
+    document.body.classList.toggle('mini-on', !!app.querySelector('.diary.mini'));
     const h = location.hash || '#/';
     if (S.renderedHash !== h) { window.scrollTo(0, 0); S.renderedHash = h; }
     return true;
@@ -194,6 +205,12 @@
         await viewMyQuestions(seq);
       } else if (r[0] === 'hw') {
         if (r[1]) await viewAssignment(r[1], seq); else await viewHomework(seq);
+      } else if (r[0] === 'h') {
+        await viewRoom(r[1] || 'me', r[2] === 'edit', seq);
+      } else if (r[0] === 'friends') {
+        await viewFriends(seq);
+      } else if (r[0] === 'ask') {
+        if (r[1]) await viewPost(r[1], seq); else await viewBoard(seq);
       } else if (teacher && r[0] !== 's') {
         return nav('#/t');
       } else {
@@ -230,10 +247,20 @@
   }
 
   // ---------- 공통 틀 ----------
-  function shell({ tabs, body }) {
+  // 학생 화면(선생님의 학생 화면 미리 보기 포함)은 '미니 다이어리' 틀: 왼쪽 프로필 칸 + 오른쪽 내용 + 옆 인덱스 탭
+  // side: 'always'(휴대폰에서도 위쪽에 프로필) · 'wide'(넓은 화면에서만) · 없음(단원 공부 화면)
+  function shell({ tabs, body, room, side }) {
     const me = S.me;
     const teacher = me.role === 'teacher';
     const inAdmin = S.route[0] === 't';
+    const c = comm();
+    const r = !inAdmin && side && c.on ? (room || c.me) : null;
+    const main = `<main class="page" id="page">${body}</main>`;
+    const frame = inAdmin ? main : `
+      <div class="mini-frame${r ? ` has-side side-${side}` : ''}">
+        ${r ? miniTop(r) : ''}
+        <div class="mini-body">${r ? `<aside class="mini-side" aria-label="${esc(roomTitle(r))} 프로필">${sidePanel(r)}</aside>` : ''}${main}</div>
+      </div>`;
     return `
     <header class="topbar">
       <a class="brand" href="${teacher ? '#/t' : '#/'}" aria-label="연지쌤 영어 다이어리 처음 화면">
@@ -247,16 +274,54 @@
         <button class="btn sm ghost" data-act="logout">로그아웃</button>
       </div>
     </header>
-    <div class="diary">
-      <nav class="index-tabs" aria-label="${teacher && inAdmin ? '관리 메뉴' : '단원 목록'}">${tabs}</nav>
-      <main class="page" id="page">${body}</main>
+    <div class="diary${inAdmin ? '' : ' mini'}">
+      <nav class="index-tabs" aria-label="${teacher && inAdmin ? '관리 메뉴' : '다이어리 메뉴'}">${tabs}</nav>
+      ${frame}
     </div>`;
+  }
+  const comm = () => (S.boot && S.boot.community) || { on: false, me: null, gbNew: 0, boardNew: 0 };
+  const myHomeId = () => (comm().me ? comm().me.id : null);
+  const roomTitle = (h) => `${h.kind === 'teacher' ? h.label : h.name}의 방`;
+  const avatar = (p, size) => `<span class="ava bg-${esc(p.bg || 'pink')}${size ? ` ${size}` : ''}" aria-hidden="true">${CHAR[p.char] || '🐰'}</span>`;
+  function miniTop(r) {
+    const m = MOOD[r.mood];
+    return `<div class="mini-top">
+      <p class="mini-today"><b class="en">TODAY IS…</b> ${m ? `<span class="mood-emo">${m[1]}</span> <span class="en">${m[2]}</span> <small>${m[3]}</small>` : '<small>기분을 아직 안 골랐어요</small>'}</p>
+      <p class="mini-name">${esc(roomTitle(r))}</p>
+    </div>`;
+  }
+  function sidePanel(r) {
+    const mine = r.id === myHomeId();
+    const here = S.route[0] === 'h' && (S.route[1] === r.id || (mine && (S.route[1] || 'me') === 'me'));
+    const teacher = S.me.role === 'teacher';
+    let action;
+    if (mine) action = '<a class="btn sm block" href="#/h/me/edit">✎ 프로필 꾸미기</a>';
+    else if (here) action = '<button type="button" class="btn sm block primary" data-act="focusWrite">방명록 쓰기</button>';
+    else action = `<a class="btn sm block primary" href="#/h/${encodeURIComponent(r.id)}">방에 놀러 가기</a>`;
+    return `
+      ${avatar(r, 'xl')}
+      <p class="mini-intro${r.intro ? '' : ' muted'}">${r.intro ? esc(r.intro) : (mine ? '한 줄 소개를 적어 보세요' : '아직 소개가 없어요')}</p>
+      <p class="mini-who"><b>${esc(r.label)}</b>${mine ? ' <span class="me-tag">나</span>' : ''}</p>
+      ${r.word ? `<p class="mini-word"><small>좋아하는 영어</small><b class="en">${esc(r.word)}</b></p>` : ''}
+      <div class="mini-links">
+        ${action}
+        ${mine ? '' : '<a class="mini-link" href="#/h/me">♥ 내 방으로</a>'}
+        <a class="mini-link" href="#/friends">☺ 친구 방 구경하기</a>
+        ${teacher && !mine && r.kind === 'student' && (r.intro || r.word || r.mood) ? `<button type="button" class="link-btn danger" data-act="clearProfile" data-id="${esc(r.id)}">소개·기분 지우기</button>` : ''}
+      </div>`;
   }
   function studentTabs(activeId) {
     const units = S.boot ? S.boot.units : [];
     const cur = S.boot ? S.boot.currentUnitId : null;
     const homeHref = S.me && S.me.role === 'teacher' ? '#/s' : '#/';
     const items = [`<a class="itab home ${!activeId ? 'on' : ''}" href="${homeHref}" ${!activeId ? 'aria-current="page"' : ''}><span class="num">✎</span><span class="t-title">홈</span></a>`];
+    const c = comm();
+    const ctab = (key, href, sym, label, count, countLabel) => `<a class="itab ${key} ${activeId === key ? 'on' : ''}" href="${href}" ${activeId === key ? 'aria-current="page"' : ''}><span class="num">${sym}</span><span class="t-title always">${label}</span>${count ? `<span class="tab-count" aria-label="${countLabel} ${count}개">${count}</span>` : ''}</a>`;
+    if (c.on && c.me) {
+      items.push(ctab('room', '#/h/me', '♥', '내 방', c.gbNew, '새 방명록'));
+      items.push(ctab('friends', '#/friends', '☺', '친구 방'));
+      items.push(ctab('ask', '#/ask', '?', '물어보세요', c.boardNew, '새 답글'));
+    }
     items.push(`<a class="itab hw ${activeId === 'hw' ? 'on' : ''}" href="#/hw" ${activeId === 'hw' ? 'aria-current="page"' : ''}><span class="num">✓</span><span class="t-title always">과제</span>${S.hwNew ? `<span class="tab-count" aria-label="새 피드백 ${S.hwNew}개">${S.hwNew}</span>` : ''}</a>`);
     units.forEach((u, i) => {
       const on = u.id === activeId;
@@ -267,7 +332,7 @@
   }
   function teacherTabs(active) {
     return TNAV.map(([k, l], i) => `<a class="itab ${k === active ? 'on' : ''}" style="--tab-c:var(--tab${(i % 5) + 1})" href="#/t${k ? `/${k}` : ''}" ${k === active ? 'aria-current="page"' : ''}>
-      <span class="t-title always">${l}</span>${k === 'questions' && S.pendingCount ? `<span class="tab-count" aria-label="답변 대기 ${S.pendingCount}개">${S.pendingCount}</span>` : ''}${k === 'hw' && S.hwWaiting ? `<span class="tab-count" aria-label="피드백 대기 ${S.hwWaiting}개">${S.hwWaiting}</span>` : ''}${k === 'settings' && S.teacherRequests ? `<span class="tab-count" aria-label="선생님 계정 신청 ${S.teacherRequests}개">${S.teacherRequests}</span>` : ''}</a>`).join('');
+      <span class="t-title always">${l}</span>${k === 'questions' && S.pendingCount ? `<span class="tab-count" aria-label="답변 대기 ${S.pendingCount}개">${S.pendingCount}</span>` : ''}${k === 'hw' && S.hwWaiting ? `<span class="tab-count" aria-label="피드백 대기 ${S.hwWaiting}개">${S.hwWaiting}</span>` : ''}${k === 'settings' && S.teacherRequests ? `<span class="tab-count" aria-label="선생님 계정 신청 ${S.teacherRequests}개">${S.teacherRequests}</span>` : ''}${k === 'community' && S.boardWaiting ? `<span class="tab-count" aria-label="답을 기다리는 질문 ${S.boardWaiting}개">${S.boardWaiting}</span>` : ''}</a>`).join('');
   }
   const empty = (msg, extra) => `<div class="empty"><p>${msg}</p>${extra || ''}</div>`;
   function noticeCard(n) {
@@ -439,19 +504,30 @@
         <a class="btn block" href="#/my-questions">내 질문과 답변 모아 보기</a>
       </section>` : `
       <section class="card qsum"><h2>학생 질문</h2><p class="hint">학생 질문은 관리 화면의 질문함에서 답변할 수 있어요.</p><a class="btn block" href="#/t/questions">질문함 열기</a></section>`;
+    const c = boot.community || {};
+    const newsCard = c.on && c.me ? `
+      <section class="card news-card">
+        <h2 class="mini-h">새 소식</h2>
+        <ul class="news-list">
+          <li><a href="#/h/me"><span class="news-ico">♥</span><span class="news-text"><b>내 방 방명록</b>${c.gbNew ? `<span class="news-new">새 글 ${c.gbNew}개</span>` : '<small>새 글 없음</small>'}</span></a></li>
+          <li><a href="#/ask"><span class="news-ico">?</span><span class="news-text"><b>무엇이든 물어보세요</b>${c.boardNew ? `<span class="news-new">새 답글 ${c.boardNew}개</span>` : '<small>궁금한 것 물어보기</small>'}</span></a></li>
+          <li><a href="#/friends"><span class="news-ico">☺</span><span class="news-text"><b>친구 방 구경하기</b><small>방명록 남기기</small></span></a></li>
+        </ul>
+      </section>` : '';
 
     const body = `
       ${student ? '' : '<div class="preview-note">학생에게 보이는 화면을 미리 보고 있어요. ‘작성 중’ 단원은 학생에게 보이지 않아요.</div>'}
       <p class="date-line">${todayStr()}</p>
       <h1>${student ? `${esc(S.me.name)}의 영어 다이어리` : '학생 화면 미리 보기'}</h1>
       ${student ? installCard() : ''}
+      ${newsCard}
       ${nowCard}
       <div class="home-grid">
         <section class="notes"><h2>선생님 공지</h2>${notices.length ? notices.map(noticeCard).join('') : '<p class="empty-sm">새 공지가 없어요.</p>'}</section>
         <div class="side-col">${hwCard}${qCard}</div>
       </div>
       <section class="mt"><h2>전체 단원</h2><div class="unit-list">${unitList}</div></section>`;
-    paint(seq, shell({ tabs: studentTabs(null), body }));
+    paint(seq, shell({ tabs: studentTabs(null), body, side: 'always' }));
   }
 
   // ---------- 학생: 단원 ----------
@@ -741,7 +817,201 @@
       <h1>내 질문 모아 보기</h1>
       <p class="hint">질문과 답변은 나와 선생님만 볼 수 있어요. 새 질문은 각 단원의 ‘선생님께 질문’에서 남길 수 있어요.</p>
       ${questions.length ? questions.map((q) => questionCard(q, { showUnit: true, isNew: isNewAnswer(q, seen) })).join('') : empty('아직 남긴 질문이 없어요.')}`;
-    if (paint(seq, shell({ tabs: studentTabs(null), body }))) markSeen(questions);
+    if (paint(seq, shell({ tabs: studentTabs(null), body, side: 'wide' }))) markSeen(questions);
+  }
+
+  // ---------- 친구 방 (프로필 + 방명록) ----------
+  // 지우기 같은 버튼은 확인 창 대신 '한 번 더 누르기'로 확인해요 (어느 브라우저에서나 똑같이 동작)
+  function armed(el, msg) {
+    if (el.dataset.armed === '1') return true;
+    const old = el.innerHTML;
+    el.dataset.armed = '1';
+    el.classList.add('armed');
+    el.textContent = msg || '한 번 더 누르면 지워져요';
+    setTimeout(() => { if (document.contains(el)) { el.dataset.armed = ''; el.classList.remove('armed'); el.innerHTML = old; } }, 3500);
+    return false;
+  }
+  async function viewRoom(id, editing, seq) {
+    const [boot, data] = await Promise.all([loadBoot(), api('GET', `/api/homes/${encodeURIComponent(id)}`)]);
+    const h = data.home;
+    const mine = data.mine;
+    if (mine && boot.community) boot.community.gbNew = 0;
+    if (mine && boot.community && boot.community.me) Object.assign(boot.community.me, h);
+    const ownerName = h.kind === 'teacher' ? h.label : h.name;
+    const writeForm = data.canWrite ? `
+      <form class="gb-write" data-form="guestbook" data-id="${esc(h.id)}">
+        <label class="sr-only" for="gbText">방명록 내용</label>
+        <textarea id="gbText" name="text" rows="3" maxlength="300" required placeholder="${esc(ownerName)}에게 한마디! 영어로 써 보면 더 좋아요 :)  예) Hi! Have a nice day!"></textarea>
+        <div class="gb-write-foot">
+          <label class="check"><input type="checkbox" name="secret"><span>🔒 비밀글 <small>방 주인과 선생님만 봐요</small></span></label>
+          <button class="btn primary sm" type="submit">남기기</button>
+        </div>
+      </form>` : '';
+    const entries = data.entries.map((e) => gbEntry(e, data, ownerName)).join('');
+    const body = `
+      <div class="room-head">
+        <h1 class="cute">${esc(roomTitle(h))}</h1>
+        ${mine ? (editing ? '' : '<a class="btn sm" href="#/h/me/edit">✎ 프로필 꾸미기</a>') : '<a class="btn sm ghost" href="#/friends">← 친구 방 목록</a>'}
+      </div>
+      ${mine && editing ? profileEditor(h) : ''}
+      <section class="gb" aria-labelledby="gbTitle">
+        <h2 class="mini-h" id="gbTitle">방명록 <small>${data.entries.length}</small></h2>
+        ${mine ? '<p class="hint">친구들이 남긴 방명록이에요. ‘답글 달기’로 고맙다고 말해 보세요. 마음에 들지 않는 글은 지울 수 있어요.</p>' : ''}
+        ${writeForm}
+        ${entries || `<p class="empty-sm">${mine ? '아직 방명록이 없어요. 친구 방에 먼저 놀러 가 보세요!' : '아직 방명록이 없어요. 첫 번째 방명록을 남겨 보세요!'}</p>`}
+      </section>`;
+    paint(seq, shell({ tabs: studentTabs(mine ? 'room' : 'friends'), body, room: h, side: 'always' }));
+  }
+  function gbEntry(e, data, ownerName) {
+    const isNew = data.mine && data.seenBefore != null && e.createdAt > data.seenBefore;
+    const teacher = S.me.role === 'teacher';
+    const author = e.author.id ? `<a class="gb-author" href="#/h/${encodeURIComponent(e.author.id)}">${esc(e.author.label)}</a>` : `<span class="gb-author">${esc(e.author.label)}</span>`;
+    let replyArea = '';
+    if (e.reply) {
+      replyArea = `<div class="gb-reply"><span class="gb-reply-mark" aria-hidden="true">↳</span><p><b>${esc(ownerName)}</b> ${nl2br(e.reply.text)} <time>${fmtDate(e.reply.at)}</time>
+        ${e.canReply || teacher ? `<button type="button" class="link-btn danger" data-act="delGbReply" data-id="${esc(e.id)}">답글 지우기</button>` : ''}</p></div>`;
+    } else if (e.canReply) {
+      replyArea = S.replyOpen === e.id ? `
+        <form class="gb-reply-form" data-form="gbReply" data-id="${esc(e.id)}">
+          <input type="text" name="text" maxlength="200" required placeholder="답글을 적어 주세요" aria-label="답글">
+          <button class="btn sm primary" type="submit">답글</button>
+          <button class="btn sm ghost" type="button" data-act="closeReply">취소</button>
+        </form>` : `<button type="button" class="link-btn" data-act="openReply" data-id="${esc(e.id)}">↳ 답글 달기</button>`;
+    }
+    return `<article class="gb-entry${e.secret ? ' secret' : ''}${isNew ? ' is-new' : ''}">
+      <header class="gb-head">
+        <span class="gb-no en">No.${esc(e.no || '')}</span>
+        ${author}${e.author.kind === 'teacher' ? ' <span class="badge t-badge">선생님</span>' : ''}
+        ${e.secret ? '<span class="gb-lock">🔒 비밀글</span>' : ''}
+        ${isNew ? '<span class="badge new">NEW</span>' : ''}
+        <time>${fmtDate(e.createdAt)}</time>
+        ${e.canDelete ? `<button type="button" class="link-btn danger" data-act="delGb" data-id="${esc(e.id)}">지우기</button>` : ''}
+      </header>
+      <div class="gb-body">${avatar(e.author)}<p class="gb-text">${nl2br(e.text)}</p></div>
+      ${replyArea}
+    </article>`;
+  }
+  function profileEditor(h) {
+    return `<form class="card profile-form" data-form="profile">
+      <h2 class="mini-h">프로필 꾸미기</h2>
+      <div class="pf-grid">
+        <div class="pf-preview">${avatar(h, 'xl')}<small>미리 보기</small></div>
+        <div class="pf-picks">
+          <fieldset class="pf-pick"><legend>캐릭터</legend><div class="pick-row">${CHARS.map(([k, emo, ko]) => `
+            <label class="pick-item" title="${ko}"><input type="radio" name="char" value="${k}" ${h.char === k ? 'checked' : ''}><span class="emo" aria-hidden="true">${emo}</span><span class="sr-only">${ko}</span></label>`).join('')}</div></fieldset>
+          <fieldset class="pf-pick"><legend>배경색</legend><div class="pick-row">${BGS.map(([k, ko]) => `
+            <label class="pick-item color" title="${ko}"><input type="radio" name="bg" value="${k}" ${h.bg === k ? 'checked' : ''}><span class="swatch bg-${k}" aria-hidden="true"></span><span class="sr-only">${ko}</span></label>`).join('')}</div></fieldset>
+        </div>
+      </div>
+      <fieldset class="pf-pick"><legend>TODAY IS… 오늘의 기분</legend><div class="pick-row moods">
+        <label class="pick-chip"><input type="radio" name="mood" value="" ${!h.mood ? 'checked' : ''}><span>안 정함</span></label>
+        ${MOODS.map(([k, emo, en, ko]) => `<label class="pick-chip"><input type="radio" name="mood" value="${k}" ${h.mood === k ? 'checked' : ''}><span>${emo} <span class="en">${en}</span> <small>${ko}</small></span></label>`).join('')}
+      </div></fieldset>
+      <label class="field"><span>한 줄 소개 <small>60자까지 · 영어로 써도 좋아요</small></span><input type="text" name="intro" maxlength="60" value="${esc(h.intro)}" placeholder="예) Hello! I love music and soccer."></label>
+      <label class="field"><span>좋아하는 영어 단어나 문장 <small>40자까지</small></span><input type="text" name="word" maxlength="40" value="${esc(h.word)}" placeholder="예) Never give up!"></label>
+      <p class="hint">친구들이 보는 곳이에요. 전화번호·주소 같은 개인 정보는 적지 마세요.</p>
+      <div class="btn-row"><button class="btn primary" type="submit">저장하기</button><a class="btn ghost" href="#/h/me">취소</a></div>
+    </form>`;
+  }
+  async function viewFriends(seq) {
+    const [, data] = await Promise.all([loadBoot(), api('GET', '/api/homes')]);
+    S.homes = data.homes;
+    const teacherView = S.me.role === 'teacher';
+    const card = (h) => {
+      const m = MOOD[h.mood];
+      return `<a class="friend${h.id === data.me ? ' me' : ''}" href="#/h/${encodeURIComponent(h.id)}">${avatar(h)}
+        <span class="friend-text"><b>${esc(h.kind === 'teacher' ? h.label : h.name)}${h.id === data.me ? ' <span class="me-tag">나</span>' : ''}</b>
+        <small>${m ? `${m[1]} ${esc(m[2])}` : ''}${m && h.intro ? ' · ' : ''}${esc(h.intro)}</small></span></a>`;
+    };
+    const groups = new Map();
+    data.homes.filter((h) => h.kind === 'student').forEach((h) => {
+      const k = `${h.grade}학년 ${h.klass}반`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(h);
+    });
+    const scopeText = teacherView ? '선생님은 모든 학생의 방을 볼 수 있어요.' : `${{ grade: '같은 학년', class: '같은 반', all: '우리 학교' }[data.scope] || '같은 학년'} 친구들의 방이 보여요.`;
+    const body = `
+      <h1 class="cute">친구 방 구경하기</h1>
+      <p class="hint">${scopeText} 방에 놀러 가서 방명록을 남겨 보세요!</p>
+      <div class="btn-row"><button type="button" class="btn sm" data-act="randomRoom">🎲 아무 방이나 놀러 가기</button></div>
+      <h2 class="mini-h mt-sm">선생님 방</h2>
+      <div class="friend-grid">${data.homes.filter((h) => h.kind === 'teacher').map(card).join('')}</div>
+      ${[...groups.entries()].map(([k, list]) => `<h2 class="mini-h mt-sm">${k} <small>${list.length}명</small></h2><div class="friend-grid">${list.map(card).join('')}</div>`).join('') || '<p class="empty-sm mt-sm">아직 친구가 없어요.</p>'}`;
+    paint(seq, shell({ tabs: studentTabs('friends'), body, side: 'wide' }));
+  }
+
+  // ---------- 무엇이든 물어보세요 (게시판) ----------
+  function postForm() {
+    if (!S.postOpen) return '<button type="button" class="btn primary" data-act="openPost">✎ 질문 올리기</button>';
+    return `<form class="card post-form" data-form="boardPost">
+      <h2 class="mini-h">질문 올리기</h2>
+      <label class="field"><span>제목 <small>60자까지</small></span><input type="text" name="title" maxlength="60" required placeholder="예) 'used to'는 언제 써요?"></label>
+      <label class="field"><span>내용 <small>1000자까지</small></span><textarea name="body" rows="4" maxlength="1000" placeholder="궁금한 것을 자세히 적을수록 좋은 답을 받을 수 있어요."></textarea></label>
+      <p class="hint">내 이름이 함께 보여요. 친구를 놀리거나 개인 정보를 적은 글은 선생님이 지울 수 있어요.</p>
+      <div class="btn-row"><button class="btn primary" type="submit">올리기</button><button class="btn ghost" type="button" data-act="closePost">취소</button></div>
+    </form>`;
+  }
+  function postBadge(p) {
+    if (p.solved) return '<span class="badge pub">해결</span>';
+    return p.commentCount ? '<span class="badge cat">답글 있음</span>' : '<span class="badge todo">답을 기다려요</span>';
+  }
+  async function viewBoard(seq) {
+    const [, data] = await Promise.all([loadBoot(), api('GET', '/api/board')]);
+    const student = S.me.role === 'student';
+    const list = student && S.boardFilter === 'mine' ? data.posts.filter((p) => p.mine) : data.posts;
+    const who = { grade: '같은 학년', class: '같은 반', all: '모든' }[data.scope] || '같은 학년';
+    const row = (p) => `<li><a class="post-row${p.newComments ? ' has-new' : ''}" href="#/ask/${encodeURIComponent(p.id)}">
+        ${avatar(p.author)}
+        <span class="post-main"><span class="post-title"><b>${esc(p.title)}</b>${p.commentCount ? ` <span class="post-count en">[${p.commentCount}]</span>` : ''}</span>
+          <small>${esc(p.author.label)} · ${fmtDate(p.createdAt)}</small></span>
+        <span class="post-badges">${postBadge(p)}${p.teacherAnswered ? '<span class="badge t-badge">선생님 답글</span>' : ''}${p.newComments ? `<span class="badge new">새 답글 ${p.newComments}</span>` : ''}</span>
+      </a></li>`;
+    const body = `
+      <h1 class="cute">무엇이든 물어보세요</h1>
+      <p class="hint">궁금한 것을 올리면 친구들과 선생님이 답글로 도와줘요. ${student ? `${who} 학생들이 볼 수 있어요. ` : ''}선생님께만 묻고 싶을 때는 단원 안의 ‘선생님께 질문’을 써 주세요.</p>
+      ${student ? postForm() : '<div class="preview-note">선생님은 글을 열어 답글을 달 수 있어요. 글 지우기는 관리 화면의 ‘방명록·게시판’에서도 할 수 있어요.</div>'}
+      ${student ? `<div class="seg small board-seg mt-sm" role="tablist" aria-label="글 고르기">
+        <button type="button" role="tab" aria-selected="${S.boardFilter !== 'mine'}" class="${S.boardFilter !== 'mine' ? 'on' : ''}" data-act="boardFilter" data-f="all">전체 질문</button>
+        <button type="button" role="tab" aria-selected="${S.boardFilter === 'mine'}" class="${S.boardFilter === 'mine' ? 'on' : ''}" data-act="boardFilter" data-f="mine">내 질문</button>
+      </div>` : ''}
+      ${list.length ? `<ul class="post-list">${list.map(row).join('')}</ul>` : empty(S.boardFilter === 'mine' && student ? '아직 올린 질문이 없어요.' : '아직 올라온 질문이 없어요. 첫 질문을 올려 보세요!')}`;
+    paint(seq, shell({ tabs: studentTabs('ask'), body, side: 'wide' }));
+  }
+  async function viewPost(id, seq) {
+    const [boot, data] = await Promise.all([loadBoot(), api('GET', `/api/board/${encodeURIComponent(id)}`)]);
+    const p = data.post;
+    const teacher = S.me.role === 'teacher';
+    if (p.mine && boot.community) boot.community.boardNew = Math.max(0, (boot.community.boardNew || 0) - p.newComments);
+    const isNew = (c) => p.mine && data.seenBefore != null && c.createdAt > data.seenBefore && !c.mine;
+    const comments = p.comments.map((c) => `<li class="cmt${c.author.kind === 'teacher' ? ' teacher' : ''}${isNew(c) ? ' is-new' : ''}">
+        ${avatar(c.author)}
+        <div class="cmt-main">
+          <p class="cmt-head"><b>${esc(c.author.label)}</b>${c.author.kind === 'teacher' ? ' <span class="badge t-badge">선생님</span>' : ''}${isNew(c) ? ' <span class="badge new">NEW</span>' : ''} <time>${fmtDate(c.createdAt)}</time>
+            ${c.canDelete ? `<button type="button" class="link-btn danger" data-act="delComment" data-post="${esc(p.id)}" data-id="${esc(c.id)}">지우기</button>` : ''}</p>
+          <p class="cmt-text">${nl2br(c.text)}</p>
+        </div></li>`).join('');
+    const body = `
+      <a class="back" href="${teacher ? '#/t/community' : '#/ask'}">← ${teacher ? '방명록·게시판 관리' : '무엇이든 물어보세요'}</a>
+      <article class="post">
+        <p class="post-state">${postBadge(p)}</p>
+        <h1 class="post-title-big">${esc(p.title)}</h1>
+        <p class="post-meta">${avatar(p.author, 'sm')}<b>${esc(p.author.label)}</b><span>${fmtDate(p.createdAt)}</span></p>
+        ${p.body ? `<div class="post-body">${nl2br(p.body)}</div>` : ''}
+        ${p.mine || teacher || p.canDelete ? `<div class="btn-row">
+          ${p.mine || teacher ? `<button type="button" class="btn sm" data-act="toggleSolved" data-id="${esc(p.id)}" data-solved="${p.solved ? '1' : ''}">${p.solved ? '다시 답을 기다릴래요' : '✓ 궁금증이 풀렸어요'}</button>` : ''}
+          ${p.canDelete ? `<button type="button" class="btn sm ghost danger" data-act="delPost" data-id="${esc(p.id)}">글 지우기</button>` : ''}
+        </div>` : ''}
+      </article>
+      <section class="cmts" aria-labelledby="cmtTitle">
+        <h2 class="mini-h" id="cmtTitle">답글 <small>${p.comments.length}</small></h2>
+        ${comments ? `<ul class="cmt-list">${comments}</ul>` : '<p class="empty-sm">아직 답글이 없어요. 아는 만큼 도와주세요!</p>'}
+        <form class="cmt-form" data-form="boardComment" data-id="${esc(p.id)}">
+          <label class="sr-only" for="cmtText">답글</label>
+          <textarea id="cmtText" name="text" rows="2" maxlength="500" required placeholder="${teacher ? '선생님 답글을 적어 주세요.' : '친절하게 답해 주세요 :)'}"></textarea>
+          <button class="btn primary sm" type="submit">답글 달기</button>
+        </form>
+      </section>`;
+    paint(seq, shell({ tabs: studentTabs('ask'), body, side: 'wide' }));
   }
 
   // ---------- 과제 (학생: 사진 제출 / 선생님: 평가·피드백) ----------
@@ -865,7 +1135,7 @@
           ${teacher ? (a.status !== 'published' ? '<span class="badge draft">작성 중</span>' : '') : hwStatusBadge(a.mine)}
           ${isNewFeedback(a.mine, seen) ? '<span class="badge new">새 피드백</span>' : ''}
         </a>`).join('')}</div>` : empty('지금 낼 과제가 없어요.')}`;
-    paint(seq, shell({ tabs: studentTabs('hw'), body }));
+    paint(seq, shell({ tabs: studentTabs('hw'), body, side: 'wide' }));
   }
 
   async function viewAssignment(id, seq) {
@@ -912,7 +1182,7 @@
       ${a.dueDate ? `<p>${dueInfo(a.dueDate)}</p>` : ''}
       ${a.description ? `<div class="card concept">${nl2br(a.description)}</div>` : ''}
       <div class="hw-grid">${mine}${form}</div>`;
-    if (paint(seq, shell({ tabs: studentTabs('hw'), body }))) markFeedbackSeen(sub);
+    if (paint(seq, shell({ tabs: studentTabs('hw'), body, side: 'wide' }))) markFeedbackSeen(sub);
   }
 
   async function tHomework(seq) {
@@ -1017,6 +1287,7 @@
     if (sub === 'unit' && r[2]) return tUnitEditor(r[2], r[3] || 'info', seq);
     if (sub === 'sheets') return tSheets(seq);
     if (sub === 'questions') return tQuestions(seq);
+    if (sub === 'community') return tCommunity(seq);
     if (sub === 'notices') return tNotices(seq);
     if (sub === 'students') return tStudents(seq);
     if (sub === 'settings') return tSettings(seq);
@@ -1068,6 +1339,7 @@
     S.pendingCount = o.pending.length;
     S.hwWaiting = o.hwWaiting || 0;
     S.teacherRequests = o.teacherRequests || 0;
+    S.boardWaiting = o.boardWaiting || 0;
     const cur = o.units.find((u) => u.id === o.currentUnitId);
     const shown = o.pending.slice(0, 3);
     const body = `
@@ -1076,6 +1348,7 @@
       <h1>${esc(S.me.name)}의 수업 다이어리</h1>
       ${S.teacherRequests ? `<a class="card hw-alert" href="#/t/settings">${ICON.pin}<span>선생님 계정 신청이 ${S.teacherRequests}개 있어요 → 설정에서 승인하기</span></a>` : ''}
       ${S.hwWaiting ? `<a class="card hw-alert" href="#/t/hw">${ICON.hw}<span>피드백을 기다리는 과제가 ${S.hwWaiting}개 있어요 → 과제 열기</span></a>` : ''}
+      ${S.boardWaiting ? `<a class="card hw-alert" href="#/t/community">${ICON.ask}<span>답글이 하나도 없는 ‘물어보세요’ 질문이 ${S.boardWaiting}개 있어요 → 열기</span></a>` : ''}
       <div class="dash">
         <section class="card dash-q" aria-labelledby="dq">
           <div class="card-head"><h2 id="dq">답변을 기다리는 질문 <span class="count-pill">${o.pending.length}</span></h2><a class="link" href="#/t/questions">질문함 전체 보기</a></div>
@@ -1106,10 +1379,47 @@
     paint(seq, tShell('', body));
   }
 
+  // 방명록·게시판 관리: 모든 글(비밀글 포함)을 보고 지우기 + 켜기·끄기와 보는 범위(주인 선생님만)
+  async function tCommunity(seq) {
+    const c = await api('GET', '/api/admin/community');
+    S.boardWaiting = c.waiting;
+    const settings = c.owner ? `
+      <form class="card comm-settings" data-form="communitySettings">
+        <h2>설정</h2>
+        <label class="check big"><input type="checkbox" name="on" ${c.on ? 'checked' : ''}><span><b>친구 방 · 방명록 · 물어보세요 켜기</b><small>끄면 학생 화면에서 이 메뉴들이 사라져요. 써 둔 글은 지워지지 않아요.</small></span></label>
+        <fieldset class="chip-pick"><legend>학생끼리 서로 볼 수 있는 범위 <small>선생님 방은 언제나 모두 볼 수 있어요</small></legend>
+          ${Object.entries(SCOPE_LABEL).map(([k, l]) => `<label class="chip-radio"><input type="radio" name="scope" value="${k}" ${c.scope === k ? 'checked' : ''}><span>${l}</span></label>`).join('')}
+        </fieldset>
+        <button class="btn primary" type="submit">설정 저장</button>
+      </form>` : `<p class="preview-note">지금 ${c.on ? '켜져 있어요' : '꺼져 있어요'} · 학생끼리 보는 범위: ${SCOPE_LABEL[c.scope]}. 이 설정은 이연지 선생님만 바꿀 수 있어요.</p>`;
+    const posts = c.posts.map((p) => `<li class="t-row c-row">
+        <div class="c-main"><a class="c-title" href="#/ask/${encodeURIComponent(p.id)}">${esc(p.title)}</a>
+          <small>${esc(p.author.label)} · ${fmtDate(p.createdAt)} · 답글 ${p.commentCount}${p.teacherAnswered ? ' · 선생님 답글 있음' : ''}</small></div>
+        <div class="btn-row">${postBadge(p)}<a class="btn xs" href="#/ask/${encodeURIComponent(p.id)}">열기 · 답글</a><button type="button" class="btn xs ghost danger" data-act="delPostT" data-id="${esc(p.id)}">지우기</button></div>
+      </li>`).join('');
+    const entries = c.entries.map((e) => `<li class="t-row c-row">
+        <div class="c-main"><p class="c-text">${e.secret ? '<span class="gb-lock">🔒 비밀글</span> ' : ''}${nl2br(e.text)}</p>
+          <small>${esc(e.author.label)} → <a href="#/h/${encodeURIComponent(e.home.id)}">${esc(e.home.label)}의 방</a> · ${fmtDate(e.createdAt)}${e.reply ? ` · 답글: ${esc(e.reply.text)}` : ''}</small></div>
+        <button type="button" class="btn xs ghost danger" data-act="delGbT" data-id="${esc(e.id)}">지우기</button>
+      </li>`).join('');
+    const body = `
+      <h1>방명록 · 게시판</h1>
+      <p class="hint">학생들의 방명록과 ‘무엇이든 물어보세요’ 글을 한곳에서 봐요. 비밀글도 선생님에게는 보이고, 알맞지 않은 글은 바로 지울 수 있어요.
+        학생들의 방은 <a href="#/friends">학생 화면 → 친구 방</a>에서 구경할 수 있고, 선생님 방은 <a href="#/h/me">여기</a>예요.</p>
+      ${settings}
+      <section class="card mt-sm"><h2>무엇이든 물어보세요 <span class="count-pill">${c.counts.posts}</span></h2>
+        ${posts ? `<ul class="t-list">${posts}</ul>` : '<p class="empty-sm">아직 올라온 질문이 없어요.</p>'}</section>
+      <section class="card mt-sm"><h2>최근 방명록 <span class="count-pill">${c.counts.entries}</span></h2>
+        ${entries ? `<ul class="t-list">${entries}</ul>` : '<p class="empty-sm">아직 방명록이 없어요.</p>'}
+        ${c.counts.entries > c.entries.length ? `<p class="hint">최근 ${c.entries.length}개만 보여요.</p>` : ''}</section>`;
+    paint(seq, tShell('community', body));
+  }
+
   async function tUnits(seq) {
     const o = await api('GET', '/api/admin/overview');
     S.adminUnits = o.units;
     S.pendingCount = o.pending.length;
+    S.boardWaiting = o.boardWaiting || 0;
     const n = o.units.length;
     const needSort = n > 1 && sortedUnitIds(o.units).join() !== o.units.map((u) => u.id).join();
     const body = `
@@ -2120,6 +2430,78 @@
       if (S.showPin.has(el.dataset.id)) S.showPin.delete(el.dataset.id); else S.showPin.add(el.dataset.id);
       render();
     },
+    // 친구 방 · 방명록
+    focusWrite: () => {
+      const t = document.getElementById('gbText');
+      if (!t) return;
+      t.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      t.focus({ preventScroll: true });
+    },
+    openReply: async (el) => {
+      S.replyOpen = el.dataset.id;
+      await render();
+      const input = document.querySelector('.gb-reply-form input');
+      if (input) input.focus();
+    },
+    closeReply: () => { S.replyOpen = null; render(); },
+    delGb: async (el) => {
+      if (!armed(el)) return;
+      await api('DELETE', `/api/guestbook/${encodeURIComponent(el.dataset.id)}`);
+      toast('방명록 글을 지웠어요.');
+      render();
+    },
+    delGbReply: async (el) => {
+      if (!armed(el)) return;
+      await api('PUT', `/api/guestbook/${encodeURIComponent(el.dataset.id)}/reply`, { text: '' });
+      toast('답글을 지웠어요.');
+      render();
+    },
+    randomRoom: () => {
+      const me = myHomeId();
+      const list = (S.homes || []).filter((h) => h.kind === 'student' && h.id !== me);
+      if (!list.length) { toast('아직 놀러 갈 친구 방이 없어요.'); return; }
+      nav(`#/h/${encodeURIComponent(list[Math.floor(Math.random() * list.length)].id)}`);
+    },
+    clearProfile: async (el) => {
+      if (!armed(el, '한 번 더 누르면 소개와 기분을 지워요')) return;
+      await api('POST', `/api/admin/profiles/${encodeURIComponent(el.dataset.id)}/clear`);
+      toast('소개와 기분을 지웠어요.');
+      render();
+    },
+    // 무엇이든 물어보세요
+    openPost: () => { S.postOpen = true; render(); },
+    closePost: () => { S.postOpen = false; render(); },
+    boardFilter: (el) => { S.boardFilter = el.dataset.f === 'mine' ? 'mine' : 'all'; render(); },
+    toggleSolved: async (el) => {
+      await api('PUT', `/api/board/${encodeURIComponent(el.dataset.id)}/solved`, { solved: !el.dataset.solved });
+      toast(el.dataset.solved ? '다시 답을 기다리는 질문이 됐어요.' : '궁금증이 풀렸다고 표시했어요.', 'ok');
+      render();
+    },
+    delPost: async (el) => {
+      if (!armed(el)) return;
+      await api('DELETE', `/api/board/${encodeURIComponent(el.dataset.id)}`);
+      toast('글을 지웠어요.');
+      nav(S.me.role === 'teacher' ? '#/t/community' : '#/ask');
+    },
+    delComment: async (el) => {
+      if (!armed(el)) return;
+      await api('DELETE', `/api/board/${encodeURIComponent(el.dataset.post)}/comments/${encodeURIComponent(el.dataset.id)}`);
+      toast('답글을 지웠어요.');
+      render();
+    },
+    // 선생님: 방명록·게시판 관리
+    delPostT: async (el) => {
+      if (!armed(el)) return;
+      await api('DELETE', `/api/board/${encodeURIComponent(el.dataset.id)}`);
+      toast('글을 지웠어요.');
+      render();
+    },
+    delGbT: async (el) => {
+      if (!armed(el)) return;
+      await api('DELETE', `/api/guestbook/${encodeURIComponent(el.dataset.id)}`);
+      toast('방명록 글을 지웠어요.');
+      render();
+    },
     delMySubmission: async (el) => {
       if (!confirm('낸 과제를 지울까요? 올린 사진도 함께 지워져요.')) return;
       await api('DELETE', `/api/assignments/${encodeURIComponent(el.dataset.id)}/submission`);
@@ -2297,6 +2679,41 @@
       toast('참여 코드를 바꿨어요.', 'ok');
       render();
     },
+    // 친구 방 · 방명록 · 물어보세요
+    profile: async (form, d) => {
+      const { profile } = await api('PUT', '/api/profile', { char: d.char, bg: d.bg, mood: d.mood || '', intro: d.intro || '', word: d.word || '' });
+      if (S.boot && S.boot.community && S.boot.community.me) Object.assign(S.boot.community.me, profile);
+      toast('프로필을 저장했어요.', 'ok');
+      nav('#/h/me');
+    },
+    guestbook: async (form, d) => {
+      await api('POST', `/api/homes/${encodeURIComponent(form.dataset.id)}/guestbook`, { text: d.text, secret: d.secret === 'on' });
+      toast('방명록을 남겼어요!', 'ok');
+      render();
+    },
+    gbReply: async (form, d) => {
+      await api('PUT', `/api/guestbook/${encodeURIComponent(form.dataset.id)}/reply`, { text: d.text });
+      S.replyOpen = null;
+      toast('답글을 달았어요.', 'ok');
+      render();
+    },
+    boardPost: async (form, d) => {
+      const { post } = await api('POST', '/api/board', { title: d.title, body: d.body });
+      S.postOpen = false;
+      toast('질문을 올렸어요!', 'ok');
+      nav(`#/ask/${encodeURIComponent(post.id)}`);
+    },
+    boardComment: async (form, d) => {
+      await api('POST', `/api/board/${encodeURIComponent(form.dataset.id)}/comments`, { text: d.text });
+      toast('답글을 달았어요.', 'ok');
+      render();
+    },
+    communitySettings: async (form, d) => {
+      await api('PUT', '/api/admin/community', { on: d.on === 'on', scope: d.scope });
+      invalidate();
+      toast('설정을 저장했어요.', 'ok');
+      render();
+    },
     password: async (form, d) => {
       if (d.next !== d.next2) throw new Error('새 비밀번호 두 칸이 서로 달라요.');
       await api('PUT', '/api/admin/password', { current: d.current, next: d.next });
@@ -2339,6 +2756,13 @@
   });
   document.addEventListener('change', async (ev) => {
     const t = ev.target;
+    const pf = t.closest && t.closest('.profile-form');
+    if (pf && (t.name === 'char' || t.name === 'bg')) { // 프로필 꾸미기: 고르는 대로 미리 보기를 바꿔요
+      const ava = pf.querySelector('.pf-preview .ava');
+      const d = Object.fromEntries(new FormData(pf));
+      if (ava) { ava.className = `ava bg-${d.bg} xl`; ava.textContent = CHAR[d.char] || '🐰'; }
+      return;
+    }
     if (t.dataset && t.dataset.replace) {
       const f = t.files && t.files[0];
       if (!f) return;

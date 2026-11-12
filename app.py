@@ -49,6 +49,15 @@ GRADES = {'excellent': '아주 잘했어요', 'good': '잘했어요', 'retry': '
 OWNER_NAME = '이연지'
 OWNER_ALIASES = {'teacher'}  # 브라우저가 예전 로그인 화면의 숨은 아이디(teacher)를 자동으로 채워도 주인 계정으로 봐요
 MAX_PENDING_TEACHERS = 10
+# 친구 방·방명록·무엇이든 물어보세요
+COMMUNITY_SCOPES = ('grade', 'class', 'all')  # 학생끼리 보는 범위: 같은 학년 / 같은 반 / 모두
+CHARACTERS = ('rabbit', 'bear', 'cat', 'dog', 'fox', 'panda', 'koala', 'tiger', 'frog', 'penguin', 'hamster', 'chick',
+              'pig', 'unicorn', 'whale', 'octopus')
+BG_COLORS = ('pink', 'rose', 'peach', 'mint', 'sky', 'lavender')
+MOODS = ('happy', 'excited', 'studying', 'curious', 'sleepy', 'hungry', 'lovely', 'cool', 'tired', 'sad')
+GB_MAX, REPLY_MAX, INTRO_MAX, WORD_MAX = 300, 200, 60, 40
+POST_TITLE_MAX, POST_BODY_MAX, COMMENT_MAX = 60, 1000, 500
+COMMUNITY_OFF = '선생님이 지금은 친구 방과 게시판을 쉬게 해 두었어요.'
 OLD_WELCOME = '연지의 영어 다이어리에 오신 것을 환영해요!'
 NEW_WELCOME = '연지쌤 영어 다이어리에 오신 것을 환영해요!'
 
@@ -154,11 +163,18 @@ def load_db():
         settings['secret'] = secrets.token_hex(32)
     if not settings.get('classCode'):
         settings['classCode'] = 'JOJONG'
-    for key in ('units', 'worksheets', 'questions', 'notices', 'students', 'assignments', 'submissions', 'teachers'):
+    for key in ('units', 'worksheets', 'questions', 'notices', 'students', 'assignments', 'submissions', 'teachers',
+                'guestbook', 'board'):
         if not isinstance(db.get(key), list):
             db[key] = []
-    if not isinstance(db.get('sessions'), dict):
-        db['sessions'] = {}
+    for key in ('sessions', 'profiles'):
+        if not isinstance(db.get(key), dict):
+            db[key] = {}
+    # 친구 방·방명록·물어보세요: 처음에는 켜 두고, 학생끼리는 같은 학년끼리만 보여요
+    if not isinstance(settings.get('communityOn'), bool):
+        settings['communityOn'] = True
+    if settings.get('communityScope') not in COMMUNITY_SCOPES:
+        settings['communityScope'] = 'grade'
     for n in db['notices']:  # 앱 이름이 바뀌어서 처음 환영 공지 제목도 바꿔요
         if n.get('title') == OLD_WELCOME:
             n['title'] = NEW_WELCOME
@@ -692,7 +708,8 @@ def bootstrap(req):
     current = cur['id'] if cur and (auth['role'] == 'teacher' or cur['status'] == 'published') else None
     notices = [n for n in db['notices'] if auth['role'] == 'teacher' or n['status'] == 'published']
     notices.sort(key=lambda n: n['createdAt'], reverse=True)
-    return ok({'units': units, 'currentUnitId': current, 'notices': [notice_out(n) for n in notices]})
+    return ok({'units': units, 'currentUnitId': current, 'notices': [notice_out(n) for n in notices],
+               'community': community_summary(auth)})
 
 
 @route('GET', '/api/units/:id')
@@ -774,6 +791,439 @@ def answer_question(req):
     return ok({'question': question_out(q, True)})
 
 
+# --- 친구 방 · 방명록 · 무엇이든 물어보세요 ---
+# 학생과 선생님마다 '방'(프로필 + 방명록)이 있어요. 방 id는 학생 id, 추가된 선생님 id, 이연지 선생님은 'owner'예요.
+# 학생끼리는 선생님이 정한 범위(같은 학년·같은 반·모두) 안에서만 서로의 방과 글을 볼 수 있고, 선생님 방은 모두 볼 수 있어요.
+# 선생님은 모든 글(비밀글 포함)을 보고 지울 수 있어요.
+def community_on():
+    return db['settings'].get('communityOn') is not False
+
+
+def community_scope():
+    scope = db['settings'].get('communityScope')
+    return scope if scope in COMMUNITY_SCOPES else 'grade'
+
+
+def community_gate(auth):
+    if auth['role'] == 'student' and not community_on():
+        raise HttpError(403, COMMUNITY_OFF)
+
+
+def my_home_id(auth):
+    if auth['role'] == 'student':
+        return auth['student']['id']
+    return auth['teacher']['id'] if auth.get('teacher') else 'owner'
+
+
+def people_map():
+    """방 주인이 될 수 있는 사람 모두 {id: 정보}. 내보낸 선생님과 지운 학생은 없어요."""
+    m = {'owner': {'id': 'owner', 'kind': 'teacher', 'name': OWNER_NAME, 'label': f'{OWNER_NAME} 선생님', 'grade': None, 'klass': None}}
+    for t in db['teachers']:
+        if t.get('status') == 'active':
+            m[t['id']] = {'id': t['id'], 'kind': 'teacher', 'name': t['name'], 'label': f"{t['name']} 선생님", 'grade': None, 'klass': None}
+    for s in db['students']:
+        m[s['id']] = {'id': s['id'], 'kind': 'student', 'name': s['name'], 'label': f"{s['grade']}-{s['klass']} {s['name']}",
+                      'grade': s['grade'], 'klass': s['klass'], 'number': s['number']}
+    return m
+
+
+def can_see_person(auth, info):
+    """auth가 info의 방과 글을 볼 수 있는지"""
+    if auth['role'] == 'teacher' or info['kind'] == 'teacher':
+        return True
+    me = auth['student']
+    if info['id'] == me['id']:
+        return True
+    scope = community_scope()
+    if scope == 'all':
+        return True
+    if info.get('grade') != me['grade']:
+        return False
+    return scope == 'grade' or info.get('klass') == me['klass']
+
+
+def profile_of(hid):
+    p = db['profiles'].get(hid) or {}
+    h = int(sha(hid)[:8], 16)  # 아직 꾸미지 않은 방은 id로 정한 캐릭터·색을 보여 줘요 (모두 같은 모양이 되지 않게)
+    return {
+        'char': p.get('char') if p.get('char') in CHARACTERS else CHARACTERS[h % len(CHARACTERS)],
+        'bg': p.get('bg') if p.get('bg') in BG_COLORS else BG_COLORS[(h // 16) % len(BG_COLORS)],
+        'mood': p.get('mood') if p.get('mood') in MOODS else '',
+        'intro': p.get('intro') or '',
+        'word': p.get('word') or '',
+    }
+
+
+def person_out(info):
+    if not info:
+        return {'id': '', 'kind': 'student', 'label': '(떠난 사람)', 'name': '', 'char': 'chick', 'bg': 'pink'}
+    p = profile_of(info['id'])
+    return {'id': info['id'], 'kind': info['kind'], 'label': info['label'], 'name': info['name'], 'char': p['char'], 'bg': p['bg']}
+
+
+def home_out(info):
+    out = {k: info.get(k) for k in ('id', 'kind', 'label', 'name', 'grade', 'klass')}
+    out.update(profile_of(info['id']))
+    return out
+
+
+def clean_text(value, max_len):
+    """여러 줄 글: 빈 줄이 너무 많이 이어지지 않게 정리해요"""
+    return re.sub(r'\n{3,}', '\n\n', clean(value, max_len, True)).strip()
+
+
+def too_fast(times, per_min, per_day):
+    now = now_ms()
+    day = [t for t in times if now - t < DAY]
+    if len(day) >= per_day or sum(1 for t in day if now - t < 60 * 1000) >= per_min:
+        raise HttpError(429, '너무 빨리 많이 쓰고 있어요. 잠시 뒤에 다시 써 주세요.')
+
+
+def entry_visible(auth, e, people, me):
+    if auth['role'] == 'teacher' or e['author'] == me:
+        return True
+    if e.get('secret') and e['home'] != me:  # 비밀글: 방 주인·쓴 사람·선생님만
+        return False
+    author = people.get(e['author'])
+    return bool(author) and can_see_person(auth, author)
+
+
+def entry_out(auth, e, people, me):
+    reply = e.get('reply')
+    return {
+        'id': e['id'], 'no': e.get('no'), 'text': e['text'], 'secret': bool(e.get('secret')), 'createdAt': e['createdAt'],
+        'author': person_out(people.get(e['author'])), 'mine': e['author'] == me,
+        'reply': {'text': reply['text'], 'at': reply['at']} if reply else None,
+        'canDelete': auth['role'] == 'teacher' or e['author'] == me or e['home'] == me,
+        'canReply': e['home'] == me,
+    }
+
+
+def post_visible(auth, p, people, me):
+    if auth['role'] == 'teacher' or p['author'] == me:
+        return True
+    author = people.get(p['author'])
+    return bool(author) and can_see_person(auth, author)
+
+
+def new_comments(p, me):
+    return sum(1 for c in p.get('comments') or [] if c['createdAt'] > p.get('seenAt', 0) and c['author'] != me)
+
+
+def post_out(auth, p, people, me, full=False):
+    comments = p.get('comments') or []
+    mine = p['author'] == me
+    out = {
+        'id': p['id'], 'title': p['title'], 'createdAt': p['createdAt'], 'solved': bool(p.get('solved')),
+        'author': person_out(people.get(p['author'])), 'mine': mine, 'commentCount': len(comments),
+        'teacherAnswered': any((people.get(c['author']) or {}).get('kind') == 'teacher' for c in comments),
+        'newComments': new_comments(p, me) if mine else 0,
+        'canDelete': auth['role'] == 'teacher' or mine,
+    }
+    if full:
+        out['body'] = p.get('body') or ''
+        out['comments'] = [{
+            'id': c['id'], 'text': c['text'], 'createdAt': c['createdAt'], 'author': person_out(people.get(c['author'])),
+            'mine': c['author'] == me, 'canDelete': auth['role'] == 'teacher' or c['author'] == me,
+        } for c in comments]
+    return out
+
+
+def board_waiting():
+    return sum(1 for p in db['board'] if not p.get('comments') and not p.get('solved'))
+
+
+def community_summary(auth):
+    """처음 화면에 필요한 것: 켜져 있는지, 내 방 프로필, 새 방명록·새 답글 수"""
+    on = community_on()
+    if auth['role'] == 'student' and not on:
+        return {'on': False, 'scope': community_scope(), 'me': None, 'gbNew': 0, 'boardNew': 0}
+    people = people_map()
+    me = my_home_id(auth)
+    seen = (db['profiles'].get(me) or {}).get('gbSeenAt', 0)
+    gb_new = sum(1 for e in db['guestbook']
+                 if e['home'] == me and e['author'] != me and e['createdAt'] > seen and entry_visible(auth, e, people, me))
+    board_new = sum(new_comments(p, me) for p in db['board'] if p['author'] == me)
+    info = people.get(me)
+    return {'on': on, 'scope': community_scope(), 'me': home_out(info) if info else None, 'gbNew': gb_new, 'boardNew': board_new}
+
+
+def forget_person(pid):
+    """학생을 지우거나 선생님을 내보낼 때: 그 사람의 방·방명록·질문·답글도 함께 지워요"""
+    db['guestbook'] = [e for e in db['guestbook'] if e['home'] != pid and e['author'] != pid]
+    db['board'] = [p for p in db['board'] if p['author'] != pid]
+    for p in db['board']:
+        p['comments'] = [c for c in p.get('comments') or [] if c['author'] != pid]
+    db['profiles'].pop(pid, None)
+
+
+def find_home(auth, raw_id):
+    people = people_map()
+    me = my_home_id(auth)
+    hid = me if raw_id == 'me' else raw_id
+    info = people.get(hid)
+    if not info or not can_see_person(auth, info):
+        raise HttpError(404, '방을 찾을 수 없어요.')
+    return info, people, me
+
+
+@route('GET', '/api/homes')
+def list_homes(req):
+    auth = require_user(req)
+    community_gate(auth)
+    people = people_map()
+    items = [i for i in people.values() if can_see_person(auth, i)]
+    items.sort(key=lambda i: (i['kind'] != 'teacher', i['id'] != 'owner', i.get('grade') or 0, i.get('klass') or 0,
+                              i.get('number') or 0, i['name']))
+    return ok({'scope': community_scope(), 'me': my_home_id(auth), 'homes': [home_out(i) for i in items]})
+
+
+@route('GET', '/api/homes/:id')
+def get_home(req):
+    auth = require_user(req)
+    community_gate(auth)
+    info, people, me = find_home(auth, req.params['id'])
+    # 최신 글이 위로 (같은 시각이면 나중에 쓴 글이 위로)
+    entries = [e for e in reversed(db['guestbook']) if e['home'] == info['id'] and entry_visible(auth, e, people, me)]
+    entries.sort(key=lambda e: e['createdAt'], reverse=True)
+    seen_before = None
+    if info['id'] == me:
+        p = db['profiles'].setdefault(me, {})
+        seen_before = p.get('gbSeenAt', 0)
+        if any(e['createdAt'] > seen_before for e in entries):  # 새 방명록이 있을 때만 '읽음'으로 저장해요
+            p['gbSeenAt'] = now_ms()
+            save()
+    return ok({
+        'home': home_out(info), 'mine': info['id'] == me, 'canWrite': info['id'] != me, 'seenBefore': seen_before,
+        'entries': [entry_out(auth, e, people, me) for e in entries[:300]],
+    })
+
+
+@route('PUT', '/api/profile')
+def update_profile(req):
+    auth = require_user(req)
+    community_gate(auth)
+    b = read_json(req)
+    me = my_home_id(auth)
+    p = db['profiles'].setdefault(me, {})
+    for key, allowed in (('char', CHARACTERS), ('bg', BG_COLORS)):
+        value = get(b, key)
+        if value is not None:
+            if value not in allowed:
+                raise HttpError(400, '고를 수 없는 모양이에요.')
+            p[key] = value
+    mood = get(b, 'mood')
+    if mood is not None:
+        if mood and mood not in MOODS:
+            raise HttpError(400, '고를 수 없는 기분이에요.')
+        p['mood'] = mood or ''
+    if 'intro' in b:
+        p['intro'] = clean(get(b, 'intro'), INTRO_MAX)
+    if 'word' in b:
+        p['word'] = clean(get(b, 'word'), WORD_MAX)
+    p['updatedAt'] = now_ms()
+    save()
+    return ok({'profile': profile_of(me)})
+
+
+@route('POST', '/api/homes/:id/guestbook')
+def write_guestbook(req):
+    auth = require_user(req)
+    community_gate(auth)
+    info, people, me = find_home(auth, req.params['id'])
+    if info['id'] == me:
+        raise HttpError(400, '내 방명록에는 글을 쓸 수 없어요. 친구 방에 놀러 가서 남겨 보세요.')
+    b = read_json(req)
+    text = clean_text(get(b, 'text'), GB_MAX)
+    if not text:
+        raise HttpError(400, '방명록 내용을 적어 주세요.')
+    if auth['role'] == 'student':
+        too_fast([e['createdAt'] for e in db['guestbook'] if e['author'] == me], 5, 100)
+    p = db['profiles'].setdefault(info['id'], {})
+    p['gbSeq'] = p.get('gbSeq', 0) + 1  # 방마다 'No.1, No.2 …' 번호를 붙여요
+    e = {'id': new_id('gb'), 'home': info['id'], 'author': me, 'no': p['gbSeq'], 'text': text,
+         'secret': get(b, 'secret') is True, 'createdAt': now_ms(), 'reply': None}
+    db['guestbook'].append(e)
+    save()
+    return ok({'entry': entry_out(auth, e, people, me)})
+
+
+@route('DELETE', '/api/guestbook/:id')
+def delete_guestbook(req):
+    auth = require_user(req)
+    community_gate(auth)
+    me = my_home_id(auth)
+    e = find_by_id(db['guestbook'], req.params['id'])
+    if not e or not (auth['role'] == 'teacher' or e['author'] == me or e['home'] == me):
+        raise HttpError(404, '방명록 글을 찾을 수 없어요.')
+    db['guestbook'].remove(e)
+    save()
+    return ok({'ok': True})
+
+
+@route('PUT', '/api/guestbook/:id/reply')
+def reply_guestbook(req):
+    """방 주인이 방명록 글 아래에 답글을 달아요. 빈 글을 보내면 답글을 지워요 (선생님은 지우기만 할 수 있어요)."""
+    auth = require_user(req)
+    community_gate(auth)
+    me = my_home_id(auth)
+    e = find_by_id(db['guestbook'], req.params['id'])
+    if not e or not (e['home'] == me or auth['role'] == 'teacher'):
+        raise HttpError(404, '방명록 글을 찾을 수 없어요.')
+    text = clean_text(get(read_json(req), 'text'), REPLY_MAX)
+    if text and e['home'] != me:
+        raise HttpError(403, '방 주인만 답글을 달 수 있어요.')
+    e['reply'] = {'text': text, 'at': now_ms()} if text else None
+    save()
+    return ok({'entry': entry_out(auth, e, people_map(), me)})
+
+
+@route('GET', '/api/board')
+def list_board(req):
+    auth = require_user(req)
+    community_gate(auth)
+    people = people_map()
+    me = my_home_id(auth)
+    items = [p for p in reversed(db['board']) if post_visible(auth, p, people, me)]
+    items.sort(key=lambda p: p['createdAt'], reverse=True)
+    return ok({'scope': community_scope(), 'posts': [post_out(auth, p, people, me) for p in items[:300]]})
+
+
+@route('POST', '/api/board')
+def create_post(req):
+    auth = require_user(req)
+    community_gate(auth)
+    if auth['role'] != 'student':
+        raise HttpError(403, '질문은 학생 계정으로 올려요. 선생님은 답글로 도와주세요.')
+    b = read_json(req)
+    title = clean(get(b, 'title'), POST_TITLE_MAX)
+    body = clean_text(get(b, 'body'), POST_BODY_MAX)
+    if len(title) < 2:
+        raise HttpError(400, '제목을 2자 이상 적어 주세요.')
+    me = my_home_id(auth)
+    too_fast([p['createdAt'] for p in db['board'] if p['author'] == me], 2, 20)
+    now = now_ms()
+    p = {'id': new_id('bp'), 'author': me, 'title': title, 'body': body, 'createdAt': now, 'seenAt': now,
+         'solved': False, 'comments': []}
+    db['board'].append(p)
+    save()
+    return ok({'post': post_out(auth, p, people_map(), me, True)})
+
+
+def find_post(auth, pid):
+    people = people_map()
+    me = my_home_id(auth)
+    p = find_by_id(db['board'], pid)
+    if not p or not post_visible(auth, p, people, me):
+        raise HttpError(404, '글을 찾을 수 없어요. 지워졌을 수도 있어요.')
+    return p, people, me
+
+
+@route('GET', '/api/board/:id')
+def get_post(req):
+    auth = require_user(req)
+    community_gate(auth)
+    p, people, me = find_post(auth, req.params['id'])
+    out = post_out(auth, p, people, me, True)
+    seen_before = p.get('seenAt', 0) if p['author'] == me else None
+    if p['author'] == me and out['newComments']:  # 내 질문의 새 답글을 '읽음'으로 저장해요
+        p['seenAt'] = now_ms()
+        save()
+    return ok({'post': out, 'seenBefore': seen_before})
+
+
+@route('DELETE', '/api/board/:id')
+def delete_post(req):
+    auth = require_user(req)
+    community_gate(auth)
+    p, people, me = find_post(auth, req.params['id'])
+    if not (auth['role'] == 'teacher' or p['author'] == me):
+        raise HttpError(403, '내가 쓴 글만 지울 수 있어요.')
+    db['board'].remove(p)
+    save()
+    return ok({'ok': True})
+
+
+@route('PUT', '/api/board/:id/solved')
+def solve_post(req):
+    auth = require_user(req)
+    community_gate(auth)
+    p, people, me = find_post(auth, req.params['id'])
+    if not (auth['role'] == 'teacher' or p['author'] == me):
+        raise HttpError(403, '질문한 사람만 바꿀 수 있어요.')
+    p['solved'] = get(read_json(req), 'solved') is True
+    save()
+    return ok({'post': post_out(auth, p, people, me, True)})
+
+
+@route('POST', '/api/board/:id/comments')
+def add_comment(req):
+    auth = require_user(req)
+    community_gate(auth)
+    p, people, me = find_post(auth, req.params['id'])
+    text = clean_text(get(read_json(req), 'text'), COMMENT_MAX)
+    if not text:
+        raise HttpError(400, '답글 내용을 적어 주세요.')
+    if auth['role'] == 'student':
+        too_fast([c['createdAt'] for q in db['board'] for c in q.get('comments') or [] if c['author'] == me], 6, 200)
+    p.setdefault('comments', []).append({'id': new_id('bc'), 'author': me, 'text': text, 'createdAt': now_ms()})
+    save()
+    return ok({'post': post_out(auth, p, people, me, True)})
+
+
+@route('DELETE', '/api/board/:id/comments/:cid')
+def delete_comment(req):
+    auth = require_user(req)
+    community_gate(auth)
+    p, people, me = find_post(auth, req.params['id'])
+    c = next((x for x in p.get('comments') or [] if x['id'] == req.params['cid']), None)
+    if not c or not (auth['role'] == 'teacher' or c['author'] == me):
+        raise HttpError(404, '답글을 찾을 수 없어요.')
+    p['comments'].remove(c)
+    save()
+    return ok({'post': post_out(auth, p, people, me, True)})
+
+
+@route('GET', '/api/admin/community')
+def admin_community(req):
+    auth = require_teacher(req)
+    people = people_map()
+    me = my_home_id(auth)
+    posts = sorted(reversed(db['board']), key=lambda p: p['createdAt'], reverse=True)[:300]
+    entries = sorted(reversed(db['guestbook']), key=lambda e: e['createdAt'], reverse=True)[:300]
+    return ok({
+        'on': community_on(), 'scope': community_scope(), 'owner': auth['owner'], 'waiting': board_waiting(),
+        'posts': [post_out(auth, p, people, me) for p in posts],
+        'entries': [dict(entry_out(auth, e, people, me), home=person_out(people.get(e['home']))) for e in entries],
+        'counts': {'posts': len(db['board']), 'entries': len(db['guestbook'])},
+    })
+
+
+@route('PUT', '/api/admin/community')
+def admin_community_settings(req):
+    require_owner(req)  # 켜기·끄기와 보는 범위는 모든 학생에게 영향을 주니 주인 선생님만 바꿔요
+    b = read_json(req)
+    scope = get(b, 'scope')
+    if scope not in COMMUNITY_SCOPES:
+        raise HttpError(400, '보는 범위를 골라 주세요.')
+    db['settings']['communityScope'] = scope
+    db['settings']['communityOn'] = get(b, 'on') is True
+    save()
+    return ok({'on': community_on(), 'scope': community_scope()})
+
+
+@route('POST', '/api/admin/profiles/:id/clear')
+def admin_clear_profile(req):
+    """알맞지 않은 소개 글이 있을 때 선생님이 소개·좋아하는 영어·기분을 지워요 (캐릭터는 그대로)"""
+    require_teacher(req)
+    hid = req.params['id']
+    if hid not in people_map():
+        raise HttpError(404, '방을 찾을 수 없어요.')
+    db['profiles'].setdefault(hid, {}).update({'intro': '', 'word': '', 'mood': ''})
+    save()
+    return ok({'profile': profile_of(hid)})
+
+
 def file_iter(path, chunk=64 * 1024):
     with open(path, 'rb') as f:
         while True:
@@ -824,6 +1274,7 @@ def admin_overview(req):
         'defaultPassword': False,
         'studentCount': len(db['students']),
         'hwWaiting': sum(1 for s in db['submissions'] if s['status'] == 'submitted'),
+        'boardWaiting': board_waiting(),
         'recentSheets': [sheet_out(w) for w in recent],
     })
 
@@ -1131,6 +1582,7 @@ def admin_delete_student(req):
     for k, v in list(db['sessions'].items()):
         if v.get('studentId') == sid:
             del db['sessions'][k]
+    forget_person(sid)
     save()
     return ok({'ok': True})
 
@@ -1510,6 +1962,7 @@ def admin_delete_teacher(req):
     for k, v in list(db['sessions'].items()):
         if v.get('teacherId') == t['id']:
             del db['sessions'][k]
+    forget_person(t['id'])
     save()
     return ok({'ok': True})
 

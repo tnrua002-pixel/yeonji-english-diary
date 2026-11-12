@@ -2,7 +2,7 @@
  * - 화면 파일은 '네트워크 먼저': 새 버전을 바로 받고, 인터넷이 끊기면 저장해 둔 화면을 보여 줘요.
  * - /api, /download, /media 요청은 저장하지 않아요. (질문·답변·파일·과제 사진은 항상 서버에서 새로 받아요)
  */
-const CACHE = 'yd-shell-v4';
+const CACHE = 'yd-shell-v5';
 const SHELL = ['/', '/index.html', '/styles.css', '/app.js', '/qr.js','/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
