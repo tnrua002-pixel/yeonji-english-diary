@@ -40,6 +40,10 @@ MAX_PHOTOS = 4
 MAX_PHOTO_BYTES = 3 * 1024 * 1024
 STORAGE_QUOTA = int(os.environ.get('STORAGE_QUOTA_MB') or 512) * 1024 * 1024  # PythonAnywhere 무료 계정 512MB
 GRADES = {'excellent': '아주 잘했어요', 'good': '잘했어요', 'retry': '다시 해 봐요'}
+# 앱 주인: 처음 비밀번호를 만든 선생님이에요. 다른 선생님 계정은 신청을 받아 이 선생님이 승인해요.
+OWNER_NAME = '이연지'
+OWNER_ALIASES = {'teacher'}  # 브라우저가 예전 로그인 화면의 숨은 아이디(teacher)를 자동으로 채워도 주인 계정으로 봐요
+MAX_PENDING_TEACHERS = 10
 OLD_WELCOME = '연지의 영어 다이어리에 오신 것을 환영해요!'
 NEW_WELCOME = '연지쌤 영어 다이어리에 오신 것을 환영해요!'
 
@@ -145,7 +149,7 @@ def load_db():
         settings['secret'] = secrets.token_hex(32)
     if not settings.get('classCode'):
         settings['classCode'] = 'JOJONG'
-    for key in ('units', 'worksheets', 'questions', 'notices', 'students', 'assignments', 'submissions'):
+    for key in ('units', 'worksheets', 'questions', 'notices', 'students', 'assignments', 'submissions', 'teachers'):
         if not isinstance(db.get(key), list):
             db[key] = []
     if not isinstance(db.get('sessions'), dict):
@@ -162,7 +166,7 @@ def load_db():
         settings['teacherHash'] = hash_secret(env_pw)
         if reset:
             for k, s in list(db['sessions'].items()):
-                if s.get('role') == 'teacher':
+                if s.get('role') == 'teacher' and not s.get('teacherId'):  # 주인 선생님 로그인만 해제
                     del db['sessions'][k]
             print('선생님 비밀번호를 TEACHER_PASSWORD 값으로 초기화했어요. 이제 RESET_TEACHER_PASSWORD 설정은 지워 주세요.', flush=True)
     settings.pop('defaultPassword', None)
@@ -238,10 +242,11 @@ def read_json(req, limit=2 * 1024 * 1024):
 
 
 # ---------- 세션/권한 ----------
-def create_session(role, student_id=None):
+def create_session(role, student_id=None, teacher_id=None):
     token = secrets.token_urlsafe(32)
     ttl = TEACHER_SESSION if role == 'teacher' else STUDENT_SESSION
-    db['sessions'][sha(token)] = {'role': role, 'studentId': student_id, 'exp': now_ms() + ttl}
+    # teacherId가 없으면 주인 선생님(이연지 선생님), 있으면 승인받아 추가된 선생님이에요
+    db['sessions'][sha(token)] = {'role': role, 'studentId': student_id, 'teacherId': teacher_id, 'exp': now_ms() + ttl}
     save()
     return token
 
@@ -261,7 +266,15 @@ def get_auth(req):
             save()
             return None
         return {'role': 'student', 'student': student, 'key': key}
-    return {'role': 'teacher', 'key': key}
+    tid = s.get('teacherId')
+    if tid:
+        teacher = next((x for x in db['teachers'] if x['id'] == tid), None)
+        if not teacher or teacher.get('status') != 'active':  # 내보낸 선생님은 바로 로그아웃돼요
+            db['sessions'].pop(key, None)
+            save()
+            return None
+        return {'role': 'teacher', 'key': key, 'teacher': teacher, 'owner': False, 'name': teacher['name']}
+    return {'role': 'teacher', 'key': key, 'teacher': None, 'owner': True, 'name': OWNER_NAME}
 
 
 def require_user(req):
@@ -278,6 +291,21 @@ def require_teacher(req):
     return auth
 
 
+def require_owner(req):
+    auth = require_teacher(req)
+    if not auth['owner']:
+        raise HttpError(403, f'{OWNER_NAME} 선생님만 할 수 있어요.')
+    return auth
+
+
+def teacher_label(auth):
+    return f"{auth['name']} 선생님"
+
+
+def teacher_key(value):
+    return re.sub(r'\s', '', clean(value, 30))
+
+
 # 로그인 '실패' 횟수 제한 (IP 기준)
 # 학교 와이파이에서는 반 전체가 같은 IP로 보이므로, 성공한 로그인은 세지 않고 실패만 셉니다.
 failures = {}
@@ -288,7 +316,7 @@ def client_ip(req):
     return ip.split(',')[0].strip()
 
 
-def check_failures(req, kind, max_count):
+def check_failures(req, kind, max_count, message='로그인에 너무 여러 번 실패했어요. 10분 뒤에 다시 시도해 주세요.'):
     fid = f'{kind}:{client_ip(req)}'
     now = now_ms()
     if len(failures) > 5000:
@@ -297,7 +325,7 @@ def check_failures(req, kind, max_count):
     recent = [t for t in failures.get(fid, []) if now - t < FAIL_WINDOW]
     failures[fid] = recent
     if len(recent) >= max_count:
-        raise HttpError(429, '로그인에 너무 여러 번 실패했어요. 10분 뒤에 다시 시도해 주세요.')
+        raise HttpError(429, message)
     return fid
 
 
@@ -409,7 +437,7 @@ def question_out(q, for_teacher):
     out = {
         'id': q['id'], 'unitId': q['unitId'], 'unitTitle': unit['title'] if unit else '(삭제된 단원)',
         'category': q['category'], 'text': q['text'], 'createdAt': q['createdAt'],
-        'answer': q.get('answer') or '', 'answeredAt': q.get('answeredAt'),
+        'answer': q.get('answer') or '', 'answeredAt': q.get('answeredAt'), 'answeredBy': q.get('answeredBy') or '',
     }
     if for_teacher:
         s = find_by_id(db['students'], q['studentId'])
@@ -556,10 +584,45 @@ def login_teacher(req):
     b = read_json(req)
     if not db['settings'].get('teacherHash'):
         raise HttpError(409, '아직 선생님 비밀번호가 없어요. 먼저 비밀번호를 만들어 주세요.')
-    if not verify_secret(str(get(b, 'password') or ''), db['settings']['teacherHash']):
+    name = teacher_key(get(b, 'name'))
+    password = str(get(b, 'password') or '')
+    # 이름을 비워 두거나 '이연지'라고 쓰면 주인 선생님 계정이에요 (예전처럼 비밀번호만 넣어도 돼요)
+    if not name or name == OWNER_NAME or name.lower() in OWNER_ALIASES:
+        if not verify_secret(password, db['settings']['teacherHash']):
+            note_failure(fid)
+            raise HttpError(403, '비밀번호가 맞지 않아요.')
+        return ok({'token': create_session('teacher')})
+    t = next((x for x in db['teachers'] if x['key'] == name), None)
+    if not t or not verify_secret(password, t['hash']):
         note_failure(fid)
-        raise HttpError(403, '비밀번호가 맞지 않아요.')
-    return ok({'token': create_session('teacher')})
+        raise HttpError(403, '이름이나 비밀번호가 맞지 않아요.')
+    if t['status'] != 'active':
+        raise HttpError(403, f'아직 {OWNER_NAME} 선생님이 승인하지 않았어요. 승인된 뒤에 다시 들어와 주세요.')
+    return ok({'token': create_session('teacher', teacher_id=t['id'])})
+
+
+@route('POST', '/api/teachers/request')
+def request_teacher(req):
+    """다른 선생님이 로그인 화면에서 계정을 신청해요. 주인 선생님이 승인해야 들어올 수 있어요."""
+    fid = check_failures(req, 'teacher-request', 5, '신청을 너무 여러 번 했어요. 10분 뒤에 다시 해 주세요.')
+    b = read_json(req)
+    name = teacher_key(get(b, 'name'))
+    password = str(get(b, 'password') or '')
+    if not re.fullmatch(r'[가-힣A-Za-z]{2,20}', name):
+        raise HttpError(400, '이름은 한글이나 영어로 2~20자 적어 주세요.')
+    if name == OWNER_NAME or name.lower() in OWNER_ALIASES or any(t['key'] == name for t in db['teachers']):
+        raise HttpError(400, '같은 이름으로 이미 신청했거나 등록된 선생님이 있어요. 이름 뒤에 과목을 붙여 주세요. 예) 김민수영어')
+    if len(password) < 8:
+        raise HttpError(400, '비밀번호는 8자 이상으로 정해 주세요.')
+    if sum(1 for t in db['teachers'] if t['status'] == 'pending') >= MAX_PENDING_TEACHERS:
+        raise HttpError(429, f'승인을 기다리는 신청이 너무 많아요. {OWNER_NAME} 선생님께 먼저 확인해 달라고 말씀해 주세요.')
+    note_failure(fid)  # 신청한 횟수도 세서, 짧은 시간에 너무 많이 신청하지 못하게 해요
+    db['teachers'].append({
+        'id': new_id('tc'), 'key': name, 'name': name, 'hash': hash_secret(password),
+        'status': 'pending', 'createdAt': now_ms(), 'approvedAt': None,
+    })
+    save()
+    return ok({'ok': True})
 
 
 @route('POST', '/api/logout')
@@ -575,7 +638,7 @@ def logout(req):
 def me(req):
     auth = require_user(req)
     if auth['role'] == 'teacher':
-        return ok({'role': 'teacher', 'name': '이연지 선생님', 'defaultPassword': False})
+        return ok({'role': 'teacher', 'name': teacher_label(auth), 'owner': auth['owner'], 'defaultPassword': False})
     s = auth['student']
     return ok({'role': 'student', 'name': s['name'], 'grade': s['grade'], 'klass': s['klass'], 'number': s['number']})
 
@@ -659,13 +722,14 @@ def delete_question(req):
 
 @route('POST', '/api/questions/:id/answer')
 def answer_question(req):
-    require_teacher(req)
+    auth = require_teacher(req)
     q = find_by_id(db['questions'], req.params['id'])
     if not q:
         raise HttpError(404, '질문을 찾을 수 없어요.')
     b = read_json(req)
     q['answer'] = clean(get(b, 'answer'), 4000, True)
     q['answeredAt'] = now_ms() if q['answer'] else None
+    q['answeredBy'] = teacher_label(auth) if q['answer'] else None
     save()
     return ok({'question': question_out(q, True)})
 
@@ -708,10 +772,12 @@ def download(req):
 # --- 교사 전용 ---
 @route('GET', '/api/admin/overview')
 def admin_overview(req):
-    require_teacher(req)
+    auth = require_teacher(req)
     pending = sorted([q for q in db['questions'] if not q.get('answer')], key=lambda q: q['createdAt'])
     recent = sorted(db['worksheets'], key=lambda w: w.get('updatedAt') or w['createdAt'], reverse=True)[:5]
     return ok({
+        'owner': auth['owner'],
+        'teacherRequests': sum(1 for t in db['teachers'] if t['status'] == 'pending') if auth['owner'] else 0,
         'pending': [question_out(q, True) for q in pending],
         'units': [unit_summary(u) for u in sorted_units()],
         'currentUnitId': db['settings'].get('currentUnitId'),
@@ -1027,13 +1093,52 @@ def admin_delete_student(req):
 
 @route('GET', '/api/admin/settings')
 def admin_settings(req):
-    require_teacher(req)
-    return ok({'classCode': db['settings']['classCode'], 'defaultPassword': False})
+    auth = require_teacher(req)
+    return ok({'classCode': db['settings']['classCode'], 'owner': auth['owner'], 'ownerName': OWNER_NAME, 'defaultPassword': False})
+
+
+# --- 선생님 계정 (신청 목록 보기·승인·거절·내보내기는 주인 선생님만) ---
+def teacher_out(t):
+    return {'id': t['id'], 'name': t['name'], 'status': t['status'], 'createdAt': t['createdAt'], 'approvedAt': t.get('approvedAt')}
+
+
+@route('GET', '/api/admin/teachers')
+def admin_teachers(req):
+    auth = require_teacher(req)
+    items = sorted(db['teachers'], key=lambda t: t['createdAt']) if auth['owner'] else []
+    return ok({'owner': auth['owner'], 'ownerName': OWNER_NAME, 'teachers': [teacher_out(t) for t in items]})
+
+
+@route('POST', '/api/admin/teachers/:id/approve')
+def admin_approve_teacher(req):
+    require_owner(req)
+    t = find_by_id(db['teachers'], req.params['id'])
+    if not t:
+        raise HttpError(404, '선생님 신청을 찾을 수 없어요.')
+    t['status'] = 'active'
+    t['approvedAt'] = now_ms()
+    save()
+    return ok({'teacher': teacher_out(t)})
+
+
+@route('DELETE', '/api/admin/teachers/:id')
+def admin_delete_teacher(req):
+    """신청 거절과 내보내기 모두 이 기능을 써요. 그 선생님의 로그인도 바로 해제돼요."""
+    require_owner(req)
+    t = find_by_id(db['teachers'], req.params['id'])
+    if not t:
+        raise HttpError(404, '선생님 계정을 찾을 수 없어요.')
+    db['teachers'].remove(t)
+    for k, v in list(db['sessions'].items()):
+        if v.get('teacherId') == t['id']:
+            del db['sessions'][k]
+    save()
+    return ok({'ok': True})
 
 
 @route('PUT', '/api/admin/settings')
 def admin_update_settings(req):
-    require_teacher(req)
+    require_owner(req)  # 참여 코드는 모든 학생에게 영향을 주니 주인 선생님만 바꿔요
     b = read_json(req)
     code = clean(get(b, 'classCode'), 20).upper()
     if not re.fullmatch(r'[A-Z0-9가-힣]{3,20}', code):
@@ -1045,16 +1150,22 @@ def admin_update_settings(req):
 
 @route('PUT', '/api/admin/password')
 def admin_password(req):
+    """로그인한 선생님 자신의 비밀번호를 바꿔요. 같은 선생님의 다른 기기 로그인만 해제돼요."""
     auth = require_teacher(req)
     b = read_json(req)
-    if not verify_secret(str(get(b, 'current') or ''), db['settings'].get('teacherHash')):
+    t = auth['teacher']
+    if not verify_secret(str(get(b, 'current') or ''), t['hash'] if t else db['settings'].get('teacherHash')):
         raise HttpError(403, '현재 비밀번호가 맞지 않아요.')
     new_pw = str(get(b, 'next') or '')
     if len(new_pw) < 8:
         raise HttpError(400, '새 비밀번호는 8자 이상으로 정해 주세요.')
-    db['settings']['teacherHash'] = hash_secret(new_pw)
+    if t:
+        t['hash'] = hash_secret(new_pw)
+    else:
+        db['settings']['teacherHash'] = hash_secret(new_pw)
+    tid = t['id'] if t else None
     for k, v in list(db['sessions'].items()):
-        if v.get('role') == 'teacher' and k != auth['key']:
+        if v.get('role') == 'teacher' and (v.get('teacherId') or None) == tid and k != auth['key']:
             del db['sessions'][k]
     save()
     return ok({'ok': True})
@@ -1098,7 +1209,7 @@ def submission_out(s, for_teacher):
     out = {
         'id': s['id'], 'assignmentId': s['assignmentId'], 'text': s.get('text', ''), 'status': s['status'],
         'grade': s.get('grade', ''), 'gradeLabel': GRADES.get(s.get('grade', ''), ''), 'feedback': s.get('feedback', ''),
-        'reviewedAt': s.get('reviewedAt'), 'createdAt': s['createdAt'], 'updatedAt': s.get('updatedAt'),
+        'reviewedAt': s.get('reviewedAt'), 'reviewedBy': s.get('reviewedBy') or '', 'createdAt': s['createdAt'], 'updatedAt': s.get('updatedAt'),
         'resubmitted': bool(s.get('resubmitted')),
         'photos': [{'url': media_url(s, i)} for i in range(len(s.get('photos', [])))],
     }
@@ -1355,7 +1466,7 @@ def admin_submissions(req):
 
 @route('POST', '/api/admin/submissions/:id/review')
 def admin_review_submission(req):
-    require_teacher(req)
+    auth = require_teacher(req)
     s = find_by_id(db['submissions'], req.params['id'])
     if not s:
         raise HttpError(404, '제출한 과제를 찾을 수 없어요.')
@@ -1367,6 +1478,7 @@ def admin_review_submission(req):
     s['feedback'] = clean(get(b, 'feedback'), 3000, True)
     s['status'] = 'reviewed'
     s['reviewedAt'] = now_ms()
+    s['reviewedBy'] = teacher_label(auth)
     save()
     return ok({'submission': submission_out(s, True)})
 

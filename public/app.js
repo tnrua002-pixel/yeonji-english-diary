@@ -90,7 +90,7 @@
     route: [], lastHash: '', renderedHash: null,
     loginMode: 'student', installEvt: null, teacherSetup: null,
     hwDraft: null, hwFilter: 'waiting', editingAssignment: null, assignmentsCache: [], hwWaiting: 0, hwNew: 0,
-    importDraft: null, importing: false,
+    importDraft: null, importing: false, teacherReq: null, teacherRequests: 0, confirmTeacher: null,
   };
 
   // ---------- 서버 통신 ----------
@@ -225,7 +225,7 @@
     <header class="topbar">
       <a class="brand" href="${teacher ? '#/t' : '#/'}" aria-label="연지쌤 영어 다이어리 처음 화면">
         <span class="brand-mark">${ICON.book}</span>
-        <span class="brand-text"><b>연지쌤 영어 다이어리</b><small>이연지 선생님</small></span>
+        <span class="brand-text"><b>연지쌤 영어 다이어리</b><small>${teacher ? esc(me.name) : '이연지 선생님'}</small></span>
       </a>
       <div class="who">
         ${teacher
@@ -254,7 +254,7 @@
   }
   function teacherTabs(active) {
     return TNAV.map(([k, l], i) => `<a class="itab ${k === active ? 'on' : ''}" style="--tab-c:var(--tab${(i % 5) + 1})" href="#/t${k ? `/${k}` : ''}" ${k === active ? 'aria-current="page"' : ''}>
-      <span class="t-title always">${l}</span>${k === 'questions' && S.pendingCount ? `<span class="tab-count" aria-label="답변 대기 ${S.pendingCount}개">${S.pendingCount}</span>` : ''}${k === 'hw' && S.hwWaiting ? `<span class="tab-count" aria-label="피드백 대기 ${S.hwWaiting}개">${S.hwWaiting}</span>` : ''}</a>`).join('');
+      <span class="t-title always">${l}</span>${k === 'questions' && S.pendingCount ? `<span class="tab-count" aria-label="답변 대기 ${S.pendingCount}개">${S.pendingCount}</span>` : ''}${k === 'hw' && S.hwWaiting ? `<span class="tab-count" aria-label="피드백 대기 ${S.hwWaiting}개">${S.hwWaiting}</span>` : ''}${k === 'settings' && S.teacherRequests ? `<span class="tab-count" aria-label="선생님 계정 신청 ${S.teacherRequests}개">${S.teacherRequests}</span>` : ''}</a>`).join('');
   }
   const empty = (msg, extra) => `<div class="empty"><p>${msg}</p>${extra || ''}</div>`;
   function noticeCard(n) {
@@ -292,10 +292,11 @@
         <button class="btn primary block lg" type="submit">비밀번호 만들고 시작하기</button>
       </form>` : `
       <form data-form="teacherLogin" autocomplete="on">
-        <input type="text" name="username" value="teacher" autocomplete="username" hidden>
+        <label class="field"><span>이름 <small>이연지 선생님은 비워 둬도 돼요</small></span><input type="text" name="name" maxlength="20" autocomplete="username" placeholder="예) 김민수"></label>
         <label class="field"><span>선생님 비밀번호</span><input type="password" name="password" required autocomplete="current-password"></label>
         <button class="btn primary block lg" type="submit">관리 화면 열기</button>
-      </form>`;
+      </form>
+      ${teacherRequestBox()}`;
     app.innerHTML = `
     <div class="login">
       <div class="cover">
@@ -314,6 +315,24 @@
       </div>
     </div>`;
     if (mode === 'teacher' && S.teacherSetup === null) checkTeacherSetup();
+  }
+  // 다른 선생님의 계정 신청: 이연지 선생님이 설정 화면에서 승인해야 들어올 수 있어요
+  function teacherRequestBox() {
+    if (S.teacherReq === 'sent') {
+      return `<div class="teacher-req sent" role="status"><b>신청했어요.</b> 이연지 선생님이 승인하면 위 칸에 <b>이름과 비밀번호</b>를 넣고 들어오세요.</div>`;
+    }
+    if (S.teacherReq !== 'open') {
+      return '<button type="button" class="btn ghost block teacher-req-open" data-act="teacherReqOpen">다른 선생님이신가요? 선생님 계정 신청하기</button>';
+    }
+    return `
+      <form class="teacher-req" data-form="teacherRequest" autocomplete="on">
+        <h2>선생님 계정 신청</h2>
+        <p class="hint">이연지 선생님이 승인하면 이 화면에서 이름과 비밀번호로 들어올 수 있어요. 승인된 선생님은 학생 질문과 과제도 함께 보게 돼요.</p>
+        <label class="field"><span>이름 <small>한글이나 영어 2~20자</small></span><input type="text" name="name" required maxlength="20" autocomplete="username" placeholder="예) 김민수"></label>
+        <label class="field"><span>비밀번호 <small>8자 이상</small></span><input type="password" name="password" required minlength="8" autocomplete="new-password"></label>
+        <label class="field"><span>비밀번호 한 번 더</span><input type="password" name="password2" required minlength="8" autocomplete="new-password"></label>
+        <div class="btn-row"><button class="btn primary" type="submit">신청하기</button><button type="button" class="btn ghost" data-act="teacherReqClose">취소</button></div>
+      </form>`;
   }
   async function checkTeacherSetup() {
     try {
@@ -673,7 +692,7 @@
         <span class="qdate">${fmtDate(q.createdAt)}</span>
       </div>
       <p class="qtext">${nl2br(q.text)}</p>
-      ${q.answer ? `<div class="answer"><span class="answer-label">이연지 선생님 답변 · ${fmtDate(q.answeredAt)}</span><p>${nl2br(q.answer)}</p></div>`
+      ${q.answer ? `<div class="answer"><span class="answer-label">${esc(q.answeredBy || '이연지 선생님')} 답변 · ${fmtDate(q.answeredAt)}</span><p>${nl2br(q.answer)}</p></div>`
         : `<div class="waiting"><span class="badge wait">답변 기다리는 중</span>${S.me.role === 'student' ? `<button class="btn sm ghost" data-act="delQuestion" data-id="${esc(q.id)}">질문 지우기</button>` : ''}</div>`}
     </div>`;
   }
@@ -685,7 +704,7 @@
     <div class="ask-grid">
       <form class="card ask-form" data-form="ask" data-unit="${esc(unit.id)}">
         <h2>선생님께 질문하기</h2>
-        <p class="hint">${teacher ? '학생 계정에서만 질문을 남길 수 있어요. (지금은 미리 보기)' : '질문과 답변은 <b>나와 이연지 선생님만</b> 볼 수 있어요.'}</p>
+        <p class="hint">${teacher ? '학생 계정에서만 질문을 남길 수 있어요. (지금은 미리 보기)' : '질문과 답변은 <b>나와 선생님만</b> 볼 수 있어요.'}</p>
         <fieldset class="chip-pick"><legend>무엇에 대한 질문인가요?</legend>
           ${CATS.map((c) => `<label class="chip-radio"><input type="radio" name="category" value="${c}" ${S.askCat === c ? 'checked' : ''}><span>${c}</span></label>`).join('')}
         </fieldset>
@@ -707,7 +726,7 @@
     const body = `
       <a class="back" href="#/">← 홈</a>
       <h1>내 질문 모아 보기</h1>
-      <p class="hint">질문과 답변은 나와 이연지 선생님만 볼 수 있어요. 새 질문은 각 단원의 ‘선생님께 질문’에서 남길 수 있어요.</p>
+      <p class="hint">질문과 답변은 나와 선생님만 볼 수 있어요. 새 질문은 각 단원의 ‘선생님께 질문’에서 남길 수 있어요.</p>
       ${questions.length ? questions.map((q) => questionCard(q, { showUnit: true, isNew: isNewAnswer(q, seen) })).join('') : empty('아직 남긴 질문이 없어요.')}`;
     if (paint(seq, shell({ tabs: studentTabs(null), body }))) markSeen(questions);
   }
@@ -824,7 +843,7 @@
     const body = `
       <a class="back" href="${teacher ? '#/s' : '#/'}">← 홈</a>
       <h1>과제</h1>
-      <p class="hint">${teacher ? '학생에게 보이는 과제 목록이에요. 과제 만들기와 평가는 관리 화면의 ‘과제’에서 해요.' : '과제를 눌러 사진을 올리고, 선생님 피드백을 확인해요. 내가 낸 과제는 나와 이연지 선생님만 볼 수 있어요.'}</p>
+      <p class="hint">${teacher ? '학생에게 보이는 과제 목록이에요. 과제 만들기와 평가는 관리 화면의 ‘과제’에서 해요.' : '과제를 눌러 사진을 올리고, 선생님 피드백을 확인해요. 내가 낸 과제는 나와 선생님만 볼 수 있어요.'}</p>
       ${assignments.length ? `<div class="hw-list">${assignments.map((a) => `
         <a class="card hw-card" href="#/hw/${encodeURIComponent(a.id)}">
           <span class="hw-icon">${ICON.hw}</span>
@@ -850,7 +869,7 @@
         ${photoGrid(sub.photos)}
         ${sub.text ? `<p class="sub-text">${nl2br(sub.text)}</p>` : ''}
         ${sub.grade ? `<div class="feedback-box ${GRADE_CLASS[sub.grade] || ''}">
-          <span class="answer-label">이연지 선생님 평가 · ${fmtDate(sub.reviewedAt)}</span>
+          <span class="answer-label">${esc(sub.reviewedBy || '이연지 선생님')} 평가 · ${fmtDate(sub.reviewedAt)}</span>
           <b class="grade-big">${esc(sub.gradeLabel)}</b>
           ${sub.feedback ? `<p>${nl2br(sub.feedback)}</p>` : ''}
           ${sub.status === 'submitted' ? '<p class="hint">고쳐서 다시 냈어요. 선생님이 다시 확인할 거예요.</p>' : ''}
@@ -871,7 +890,7 @@
         <label class="field"><span>하고 싶은 말 <small>선택</small></span><textarea name="text" rows="3" maxlength="1000" placeholder="예) 3번 문제가 조금 어려웠어요."></textarea></label>
         <label class="field"><span>개인 비밀번호 (PIN 4자리) <small>로그인할 때 쓰는 번호</small></span><input type="password" name="pin" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off"></label>
         <button class="btn primary block lg" type="submit">${ICON.upload}<span>${sub ? '다시 내기' : '과제 내기'}</span></button>
-        <p class="hint center">내가 낸 과제는 나와 이연지 선생님만 볼 수 있어요.</p>
+        <p class="hint center">내가 낸 과제는 나와 선생님만 볼 수 있어요.</p>
       </form>` : (teacher ? '<p class="preview-note">학생 계정에서 과제를 낼 수 있어요. 낸 과제는 관리 화면의 ‘과제’에서 평가해요.</p>' : '');
     const body = `
       <a class="back" href="#/hw">← 과제 목록</a>
@@ -1035,12 +1054,14 @@
     S.adminUnits = o.units;
     S.pendingCount = o.pending.length;
     S.hwWaiting = o.hwWaiting || 0;
+    S.teacherRequests = o.teacherRequests || 0;
     const cur = o.units.find((u) => u.id === o.currentUnitId);
     const shown = o.pending.slice(0, 3);
     const body = `
       ${o.defaultPassword ? '<div class="alert">지금 기본 비밀번호(teacher1234)를 쓰고 있어요. 학생에게 주소를 알려 주기 전에 <a href="#/t/settings">설정</a>에서 꼭 바꿔 주세요.</div>' : ''}
       <p class="date-line">${todayStr()}</p>
-      <h1>이연지 선생님의 수업 다이어리</h1>
+      <h1>${esc(S.me.name)}의 수업 다이어리</h1>
+      ${S.teacherRequests ? `<a class="card hw-alert" href="#/t/settings">${ICON.pin}<span>선생님 계정 신청이 ${S.teacherRequests}개 있어요 → 설정에서 승인하기</span></a>` : ''}
       ${S.hwWaiting ? `<a class="card hw-alert" href="#/t/hw">${ICON.hw}<span>피드백을 기다리는 과제가 ${S.hwWaiting}개 있어요 → 과제 열기</span></a>` : ''}
       <div class="dash">
         <section class="card dash-q" aria-labelledby="dq">
@@ -1548,8 +1569,33 @@
     paint(seq, tShell('students', body));
   }
 
+  function teachersCard(t) {
+    const pending = t.teachers.filter((x) => x.status === 'pending');
+    const active = t.teachers.filter((x) => x.status === 'active');
+    const row = (x, actions) => `
+      <li class="t-row">
+        <div class="t-info"><b>${esc(x.name)} 선생님</b><small>${x.status === 'pending' ? `신청 ${fmtDate(x.createdAt)}` : `승인 ${fmtDate(x.approvedAt || x.createdAt)}`}</small></div>
+        <div class="btn-row">${actions}</div>
+      </li>`;
+    return `
+      <section class="card teachers-card" id="teachers">
+        <h2>선생님 계정 ${pending.length ? `<span class="count-pill">신청 ${pending.length}</span>` : ''}</h2>
+        <p class="hint">다른 선생님이 로그인 화면에서 ‘선생님 계정 신청’을 하면 여기에 나와요. 승인한 선생님은 이름과 비밀번호로 들어와서 단원·학습지·질문·과제·학생 관리를 함께 쓸 수 있어요. 선생님 계정 관리와 참여 코드 바꾸기는 ${esc(t.ownerName)} 선생님만 할 수 있어요.</p>
+        <h3>승인을 기다리는 신청</h3>
+        ${pending.length ? `<ul class="t-list">${pending.map((x) => row(x, `
+          <button class="btn sm primary" data-act="approveTeacher" data-id="${esc(x.id)}" data-name="${esc(x.name)}">승인</button>
+          <button class="btn sm ghost" data-act="rejectTeacher" data-id="${esc(x.id)}" data-name="${esc(x.name)}">거절</button>`)).join('')}</ul>` : '<p class="empty-sm">기다리는 신청이 없어요.</p>'}
+        <h3>함께 쓰는 선생님</h3>
+        ${active.length ? `<ul class="t-list">${active.map((x) => row(x, S.confirmTeacher === x.id ? `
+          <span class="warn-sm">정말 내보낼까요?</span>
+          <button class="btn sm danger" data-act="removeTeacher" data-id="${esc(x.id)}" data-name="${esc(x.name)}">내보내기</button>
+          <button class="btn sm ghost" data-act="cancelRemoveTeacher">취소</button>` : `
+          <button class="btn sm ghost danger" data-act="askRemoveTeacher" data-id="${esc(x.id)}">내보내기</button>`)).join('')}</ul>` : `<p class="empty-sm">아직 함께 쓰는 선생님이 없어요. ${esc(t.ownerName)} 선생님만 쓰고 있어요.</p>`}
+      </section>`;
+  }
   async function tSettings(seq) {
-    const s = await api('GET', '/api/admin/settings');
+    const [s, t] = await Promise.all([api('GET', '/api/admin/settings'), api('GET', '/api/admin/teachers')]);
+    S.teacherRequests = t.owner ? t.teachers.filter((x) => x.status === 'pending').length : 0;
     const invite = `[연지쌤 영어 다이어리]\n주소: ${location.origin}\n참여 코드: ${s.classCode}\n처음 접속할 때 학년·반·번호·이름을 넣고, 나만 아는 PIN 4자리를 정하세요.`;
     const body = `
       <h1>설정</h1>
@@ -1560,16 +1606,17 @@
           <p class="hint">아래 문구를 복사해 학급 알림장이나 칠판에 안내해 주세요.</p>
           <pre class="invite">${esc(invite)}</pre>
           <button type="button" class="btn primary sm" data-act="copyInvite" data-text="${esc(invite)}">안내 문구 복사</button>
-          <form data-form="settings" class="mt-sm">
+          ${s.owner ? `<form data-form="settings" class="mt-sm">
             <label class="field"><span>참여 코드 바꾸기 <small>영어·숫자·한글 3~20자</small></span><input type="text" name="classCode" value="${esc(s.classCode)}" maxlength="20" required autocapitalize="characters"></label>
             <button class="btn sm" type="submit">참여 코드 저장</button>
             <p class="hint">코드를 바꿔도 이미 접속한 학생은 그대로 쓸 수 있어요. 새로 들어오는 학생만 새 코드가 필요해요.</p>
-          </form>
+          </form>` : `<p class="hint mt-sm">참여 코드는 ${esc(s.ownerName)} 선생님만 바꿀 수 있어요.</p>`}
         </section>
+        ${t.owner ? teachersCard(t) : ''}
         <section class="card">
-          <h2>선생님 비밀번호 바꾸기</h2>
+          <h2>내 비밀번호 바꾸기</h2>
           <form data-form="password" autocomplete="on">
-            <input type="text" name="username" value="teacher" autocomplete="username" hidden>
+            <input type="text" name="username" value="${esc(s.owner ? 'teacher' : S.me.name.replace(/ 선생님$/, ''))}" autocomplete="username" hidden>
             <label class="field"><span>지금 비밀번호</span><input type="password" name="current" required autocomplete="current-password"></label>
             <label class="field"><span>새 비밀번호 <small>8자 이상</small></span><input type="password" name="next" required minlength="8" autocomplete="new-password"></label>
             <label class="field"><span>새 비밀번호 한 번 더</span><input type="password" name="next2" required minlength="8" autocomplete="new-password"></label>
@@ -1607,6 +1654,27 @@
       render();
     },
     loginMode: (el) => { S.loginMode = el.dataset.mode; viewLogin(); },
+    teacherReqOpen: () => { S.teacherReq = 'open'; viewLogin(); },
+    teacherReqClose: () => { S.teacherReq = null; viewLogin(); },
+    approveTeacher: async (el) => {
+      await api('POST', `/api/admin/teachers/${encodeURIComponent(el.dataset.id)}/approve`);
+      toast(`${el.dataset.name} 선생님 계정을 승인했어요. 이제 이름과 비밀번호로 들어올 수 있어요.`, 'ok');
+      render();
+    },
+    rejectTeacher: async (el) => {
+      await api('DELETE', `/api/admin/teachers/${encodeURIComponent(el.dataset.id)}`);
+      toast(`${el.dataset.name} 선생님의 신청을 거절했어요.`);
+      render();
+    },
+    // 내보내기는 확인 창 대신 화면 안에서 한 번 더 물어봐요
+    askRemoveTeacher: (el) => { S.confirmTeacher = el.dataset.id; render(); },
+    cancelRemoveTeacher: () => { S.confirmTeacher = null; render(); },
+    removeTeacher: async (el) => {
+      await api('DELETE', `/api/admin/teachers/${encodeURIComponent(el.dataset.id)}`);
+      S.confirmTeacher = null;
+      toast(`${el.dataset.name} 선생님 계정을 내보냈어요. 그 선생님은 바로 로그아웃돼요.`);
+      render();
+    },
     install: async () => {
       if (!S.installEvt) return;
       S.installEvt.prompt();
@@ -1992,10 +2060,18 @@
       history.replaceState(null, '', '#/');
       render();
     },
+    teacherRequest: async (form, d) => {
+      if ((d.name || '').trim().length < 2) throw new Error('이름을 적어 주세요.');
+      if ((d.password || '').length < 8) throw new Error('비밀번호는 8자 이상으로 정해 주세요.');
+      if (d.password !== d.password2) throw new Error('두 칸의 비밀번호가 서로 달라요.');
+      await api('POST', '/api/teachers/request', { name: d.name, password: d.password });
+      S.teacherReq = 'sent';
+      viewLogin();
+    },
     teacherLogin: async (form, d) => {
       let r;
       try {
-        r = await api('POST', '/api/login/teacher', { password: d.password });
+        r = await api('POST', '/api/login/teacher', { name: d.name || '', password: d.password });
       } catch (e) {
         if (e.status === 409) { S.teacherSetup = true; viewLogin(); }
         throw e;
@@ -2078,7 +2154,7 @@
       if (d.next !== d.next2) throw new Error('새 비밀번호 두 칸이 서로 달라요.');
       await api('PUT', '/api/admin/password', { current: d.current, next: d.next });
       S.me = null;
-      toast('비밀번호를 바꿨어요. 다른 기기의 선생님 로그인은 모두 해제됐어요.', 'ok');
+      toast('비밀번호를 바꿨어요. 다른 기기에 로그인된 내 계정은 모두 로그아웃됐어요.', 'ok');
       render();
     },
   };
