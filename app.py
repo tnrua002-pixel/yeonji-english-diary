@@ -503,6 +503,38 @@ def health(req):
     return ok({'ok': True})
 
 
+# --- 화면 버전: 화면 파일이 바뀌면(새 버전을 올리면) 값이 달라져요. 열려 있는 앱이 '새로고침' 안내를 띄울 때 써요 ---
+VERSION_FILES = ('index.html', 'app.js', 'styles.css')
+_version_cache = {}
+
+
+def app_version():
+    stamp = []
+    for name in VERSION_FILES:
+        try:
+            st = os.stat(os.path.join(PUBLIC_DIR, name))
+            stamp.append((name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            stamp.append((name, 0, 0))
+    key = tuple(stamp)
+    if key not in _version_cache:  # 파일이 바뀌었을 때만 내용을 다시 읽어요
+        h = hashlib.sha256()
+        for name in VERSION_FILES:
+            try:
+                with open(os.path.join(PUBLIC_DIR, name), 'rb') as f:
+                    h.update(f.read())
+            except OSError:
+                pass
+        _version_cache.clear()
+        _version_cache[key] = h.hexdigest()[:12]
+    return _version_cache[key]
+
+
+@route('GET', '/api/version')
+def version(req):
+    return ok({'version': app_version()})
+
+
 # --- 로그인 ---
 @route('GET', '/api/setup-status')
 def setup_status(req):

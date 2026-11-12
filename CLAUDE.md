@@ -19,7 +19,8 @@
 - `app.py`: Python 표준 라이브러리만 쓰는 WSGI 서버예요. 자료는 JSON 파일(`DATA_DIR/db.json`)에, 업로드 파일은 `DATA_DIR/uploads`에 저장해요. 모든 요청에서 서버가 권한을 확인해요.
 - `seed.py`: 새 DB를 만들 때 넣는 샘플 단원, 학습지 PDF, 공지, 과제예요.
 - `public/`: `index.html`, `app.js`(학생+선생님 화면, 해시 라우팅), `styles.css`, `sw.js`, `manifest.webmanifest`, `icons/`
-- `tests/`: `smoke-test.js`(서버 기능·권한 156개 점검), `reset-test.js`(선생님 비밀번호 초기화)
+- `tests/`: `smoke-test.js`(서버 기능·권한 158개 점검), `reset-test.js`(선생님 비밀번호 초기화)
+- 새 버전 알림: `GET /api/version`이 `public/`의 index.html·app.js·styles.css 내용으로 만든 12자리 값을 줘요. 앱은 처음 열 때 값을 기억하고 5분마다(그리고 탭으로 돌아올 때) 다시 확인해서, 값이 바뀌면 위쪽에 ‘새 버전이 나왔어요 · 새로고침’ 띠를 보여 줘요 (수업 모드·인쇄에서는 숨김).
 - 선생님 계정: 주인은 이연지 선생님(`OWNER_NAME`, 비밀번호는 `settings.teacherHash`, 로그인할 때 이름을 비우거나 ‘이연지’·‘teacher’라고 써도 돼요). 다른 선생님은 로그인 화면의 ‘선생님 계정 신청’ → `db.teachers`에 pending으로 저장 → 주인이 **설정 → 선생님 계정**에서 승인·거절·내보내기 → 이름+비밀번호로 로그인. 세션의 `teacherId`가 없으면 주인이에요. 선생님 관리와 참여 코드 바꾸기는 주인만 할 수 있어요. 질문 답변과 과제 평가에는 답한 선생님 이름(`answeredBy`·`reviewedBy`)이 남아 학생 화면에 보여요. 화면 왼쪽 위에는 로그인한 선생님 이름이 나와요.
 - 단원 파일 가져오기: 선생님 화면 → 단원 관리 → ‘단원 파일 고르기’ → `POST /api/admin/units/import`. 파일 형식은 `{"format": "yeonji-diary-units", "units": [{title, subtitle, words, paragraphs, grammar, worksheets: [{title, description, fileName, data(base64)}]}]}`. 단원은 늘 ‘작성 중’으로, 학습지는 ‘공개’로 들어가요(단원을 공개하면 함께 보여요). 파일 속 id는 버리고 새로 만들어요. 학습지 형식이 하나라도 잘못되면 아무것도 넣지 않아요.
 - 학생 로그인: 참여 코드 + 학년·반·번호·이름 + PIN 4자리. 과제를 낼 때도 PIN을 다시 확인해요.

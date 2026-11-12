@@ -615,6 +615,14 @@ input[type=file] { width: 100%; max-width: 100%; font-size: .95rem; padding: 10p
   z-index: 200; text-align: center; pointer-events: none;
 }
 #toast.show { transform: translate(-50%, 0); opacity: 1; visibility: visible; }
+.update-bar {
+  position: fixed; left: 50%; top: max(12px, env(safe-area-inset-top)); transform: translateX(-50%);
+  display: flex; align-items: center; gap: 12px; max-width: calc(100vw - 32px); padding: 8px 8px 8px 18px;
+  border-radius: 999px; background: var(--green-d); color: #fff; font-weight: 600;
+  box-shadow: 0 10px 30px rgba(0,0,0,.22); z-index: 190;
+}
+.update-bar .btn { background: #fff; color: var(--green-d); border-color: #fff; white-space: nowrap; }
+body.class-mode .update-bar { display: none; }
 #toast.ok { background: var(--green-d); }
 #toast.err { background: var(--red); }
 
@@ -674,7 +682,7 @@ input[type=file] { width: 100%; max-width: 100%; font-size: .95rem; padding: 10p
 }
 @media print {
   body { background: #fff; }
-  .topbar, .index-tabs, .sec-tabs, .pass-toolbar, .class-bar, .savebar, #toast { display: none !important; }
+  .topbar, .index-tabs, .sec-tabs, .pass-toolbar, .class-bar, .savebar, #toast, .update-bar { display: none !important; }
   .page { box-shadow: none; background: #fff; padding: 0; }
   .page::before { display: none; }
   .sent .ko { display: block; }

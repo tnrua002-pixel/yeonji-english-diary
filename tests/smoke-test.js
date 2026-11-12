@@ -314,6 +314,9 @@ async function req(method, url, { token, body, raw, headers } = {}) {
     check('상태 확인 주소 /api/health', hc.status === 200 && hc.json.ok === true);
     const hcHttp = await req('GET', '/api/health', { headers: { 'X-Forwarded-Proto': 'http' } });
     check('상태 확인은 http에서도 리다이렉트 없이 200', hcHttp.status === 200);
+    const ver1 = await req('GET', '/api/version');
+    check('화면 버전 주소 (로그인 없이, 12자리)', ver1.status === 200 && /^[0-9a-f]{12}$/.test(ver1.json.version) && /no-store/.test(ver1.headers.get('cache-control') || ''), ver1.json);
+    check('화면 파일이 그대로면 버전도 그대로', (await req('GET', '/api/version')).json.version === ver1.json.version);
     const rd = await new Promise((resolve, reject) => {
       require('http').get({ host: '127.0.0.1', port: PORT, path: '/?a=1', headers: { 'X-Forwarded-Proto': 'http', Host: 'diary.example.org' } }, (r) => { r.resume(); resolve({ status: r.statusCode, location: r.headers.location }); }).on('error', reject);
     });

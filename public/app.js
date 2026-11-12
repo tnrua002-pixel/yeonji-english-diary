@@ -2256,5 +2256,43 @@
     window.addEventListener('load', () => { navigator.serviceWorker.register('/sw.js').catch(() => {}); });
   }
 
+  // ---------- 새 버전 알림: 서버의 화면 파일이 바뀌면 위쪽에 '새로고침' 안내를 띄워요 ----------
+  // (앱을 며칠씩 켜 두어도 새 기능을 놓치지 않게. 수업 모드에서는 보이지 않아요)
+  let loadedVersion = null;
+  let lastVersionCheck = 0;
+  async function checkVersion() {
+    lastVersionCheck = Date.now();
+    let v = null;
+    try {
+      const res = await fetch('/api/version', { cache: 'no-store' });
+      if (res.ok) v = (await res.json()).version;
+    } catch (e) { return; } // 인터넷이 끊겼을 때는 조용히 넘어가요
+    if (!v) return;
+    if (!loadedVersion) loadedVersion = v;
+    else if (v !== loadedVersion) showUpdateBar();
+  }
+  function showUpdateBar() {
+    if (document.getElementById('updateBar')) return;
+    const bar = document.createElement('div');
+    bar.id = 'updateBar';
+    bar.className = 'update-bar';
+    bar.setAttribute('role', 'status');
+    bar.innerHTML = '<span>새 버전이 나왔어요.</span><button type="button" class="btn sm" data-act="reloadApp">새로고침</button>';
+    document.body.appendChild(bar);
+  }
+  ACT.reloadApp = () => {
+    if (S.dirty && !S.reloadAsked) {
+      S.reloadAsked = true;
+      toast('저장하지 않은 변경 사항이 있어요. 먼저 저장해 주세요. (그냥 새로고침하려면 한 번 더 누르세요)', 'err');
+      return;
+    }
+    location.reload();
+  };
+  const checkSoon = () => { if (Date.now() - lastVersionCheck > 30 * 1000) checkVersion(); };
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkSoon(); });
+  window.addEventListener('focus', checkSoon);
+  setInterval(checkVersion, 5 * 60 * 1000);
+  checkVersion();
+
   render();
 })();
